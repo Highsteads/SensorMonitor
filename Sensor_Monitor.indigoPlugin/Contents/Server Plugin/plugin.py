@@ -4,7 +4,7 @@
 # Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        27-02-2026
-# Version:     1.3.0
+# Version:     1.4.0
 
 try:
     import indigo
@@ -33,6 +33,19 @@ from datetime import datetime
 CONFIG_PATH = os.path.expanduser(
     "~/Documents/Indigo/SensorMonitor/sensor_monitor_config.json"
 )
+
+DISCOVERY_OUTPUT_PATH = os.path.expanduser(
+    "~/Documents/Indigo/SensorMonitor/device_discovery.json"
+)
+
+# ======================================
+# DISCOVERY CONSTANTS
+#
+# Used by the menu-driven discovery methods.
+# ======================================
+
+_CONTACT_STATE_NAMES   = {"contact", "doorSensor", "windowSensor"}
+_CONTACT_NAME_KEYWORDS = ["contact", "door", "window", "entry", "gate", "patio", "garage"]
 
 # ======================================
 # DEVICE MONITOR CONFIGURATION  (FALLBACK)
@@ -243,6 +256,221 @@ class Plugin(indigo.PluginBase):
             f"'{var.name}' (ID: {var.id}) - "
             f"remove from config file or VARIABLE_MONITOR in plugin.py"
         )
+
+    # ======================================
+    # MENU ITEM CALLBACKS
+    # Plugins > Sensor Monitor > ...
+    # ======================================
+
+    def menuDiscoverDevices(self):
+        """Scan all Indigo devices, write device_discovery.json and
+        sensor_monitor_config.json to ~/Documents/Indigo/SensorMonitor/.
+
+        Contact sensor candidates are written as active entries.
+        All other devices are written as commented-out entries.
+        """
+        ts = datetime.now().strftime('%H:%M:%S')
+        self.logger.info(f"[{ts}] [Sensor Monitor] Device discovery starting...")
+
+        all_devices     = []
+        contact_sensors = []
+
+        for dev in indigo.devices:
+            states     = self._disc_states(dev)
+            folder     = self._disc_folder_name(dev)
+            is_contact = self._disc_is_contact(dev, states)
+
+            entry = {
+                "id":                   dev.id,
+                "name":                 dev.name,
+                "folder":               folder,
+                "enabled":              getattr(dev, "enabled", True),
+                "on_state":             dev.onState if hasattr(dev, "onState") else None,
+                "states":               states,
+                "is_contact_candidate": is_contact,
+            }
+            all_devices.append(entry)
+            if is_contact:
+                contact_sensors.append(entry)
+
+        all_devices.sort(key=lambda x: x["name"].lower())
+        contact_sensors.sort(key=lambda x: x["name"].lower())
+
+        # --- Save device_discovery.json ---
+        try:
+            os.makedirs(os.path.dirname(DISCOVERY_OUTPUT_PATH), exist_ok=True)
+            discovery_output = {
+                "generated":          datetime.now().isoformat(),
+                "total_devices":      len(all_devices),
+                "contact_candidates": len(contact_sensors),
+                "contact_sensors":    contact_sensors,
+                "all_devices":        all_devices,
+            }
+            with open(DISCOVERY_OUTPUT_PATH, "w", encoding="utf-8") as f:
+                json.dump(discovery_output, f, indent=2, default=str)
+            self.logger.info(f"[{ts}] Full device list saved to: {DISCOVERY_OUTPUT_PATH}")
+        except Exception as e:
+            self.logger.error(f"[{ts}] ERROR saving device_discovery.json: {e}")
+
+        # --- Save sensor_monitor_config.json ---
+        try:
+            lines = ["{"]
+            lines.append(f'  "_generated": "{datetime.now().isoformat()}",')
+            lines.append(f'  "_total_scanned": {len(all_devices)},')
+            lines.append('  "_usage": "Lines starting with # are ignored. '
+                         'Reload plugin after changes.",')
+            lines.append("")
+            lines.append('  "devices": [')
+            lines.append("")
+
+            if contact_sensors:
+                lines.append("    # --- Contact / Door / Window sensors (active) ---")
+                for d in contact_sensors:
+                    lines.append(
+                        self._disc_config_entry(
+                            indigo.devices[d["id"]], d["states"], commented=False
+                        ) + ","
+                    )
+                lines.append("")
+
+            non_contact = [d for d in all_devices if not d["is_contact_candidate"]]
+            if non_contact:
+                lines.append("    # --- Other devices (remove # to enable) ---")
+                for d in non_contact:
+                    lines.append(
+                        self._disc_config_entry(
+                            indigo.devices[d["id"]], d["states"], commented=True
+                        ) + ","
+                    )
+                lines.append("")
+
+            lines.append('  ],')
+            lines.append("")
+            lines.append('  "variables": [')
+            lines.append("")
+            lines.append(
+                '    # Add variables: {"id": 123456789, "name": "Var_Name", "label": "Display Label"}'
+            )
+            lines.append("")
+            lines.append('  ]')
+            lines.append("}")
+
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            self.logger.info(f"[{ts}] Plugin config saved to: {CONFIG_PATH}")
+        except Exception as e:
+            self.logger.error(f"[{ts}] ERROR saving sensor_monitor_config.json: {e}")
+
+        # --- Summary ---
+        self.logger.info(
+            f"[{ts}] Discovery complete: {len(all_devices)} devices scanned, "
+            f"{len(contact_sensors)} contact sensor candidate(s)"
+        )
+        if contact_sensors:
+            for d in contact_sensors:
+                self.logger.info(
+                    f"[{ts}]   {d['name']} (ID: {d['id']}, Folder: {d['folder']})"
+                )
+        self.logger.info(
+            f"[{ts}] Reload to apply: Plugins > Sensor Monitor > Reload Plugin"
+        )
+
+    def menuFindContactSensors(self):
+        """Log all contact/door/window sensor candidates to the Indigo event log."""
+        ts = datetime.now().strftime('%H:%M:%S')
+        self.logger.info(f"[{ts}] === Contact/Door/Window Sensor Discovery ===")
+
+        found = []
+        for dev in indigo.devices:
+            states = self._disc_states(dev)
+            if self._disc_is_contact(dev, states):
+                found.append({
+                    "id":     dev.id,
+                    "name":   dev.name,
+                    "folder": self._disc_folder_name(dev),
+                    "states": states,
+                })
+
+        if not found:
+            self.logger.info(f"[{ts}] No contact/door/window sensors found.")
+        else:
+            self.logger.info(f"[{ts}] Found {len(found)} candidate(s):")
+            for d in sorted(found, key=lambda x: x["name"]):
+                dev_obj = indigo.devices[d["id"]]
+                entry   = self._disc_config_entry(dev_obj, d["states"], commented=False)
+                self.logger.info(f"[{ts}]   {d['name']}  (ID: {d['id']}, Folder: {d['folder']})")
+                self.logger.info(f"[{ts}]   {entry}")
+
+        self.logger.info(f"[{ts}] === End of Discovery ===")
+
+    def menuReloadConfig(self):
+        """Reload sensor_monitor_config.json without a full plugin restart.
+
+        Equivalent to a plugin reload for config changes, but preserves
+        the existing device/variable subscriptions.
+        """
+        old_dev_count = len(self.device_monitor)
+        old_var_count = len(self.variable_monitor)
+
+        self._load_config()
+        self._validate_monitored_devices()
+        self._validate_monitored_variables()
+
+        ts = datetime.now().strftime('%H:%M:%S')
+        self.logger.info(
+            f"[{ts}] [Sensor Monitor] Config reloaded - "
+            f"{old_dev_count} -> {len(self.device_monitor)} devices, "
+            f"{old_var_count} -> {len(self.variable_monitor)} variables"
+        )
+
+    # ======================================
+    # DISCOVERY HELPERS
+    # (shared by menu callbacks and standalone scripts)
+    # ======================================
+
+    def _disc_folder_name(self, dev):
+        """Return dev's Indigo folder name, or '(root)' if in root or on error."""
+        try:
+            if dev.folderId and dev.folderId in indigo.devices.folders:
+                return indigo.devices.folders[dev.folderId].name
+        except Exception:
+            pass
+        return "(root)"
+
+    def _disc_states(self, dev):
+        """Return a dict of state name -> current value for dev."""
+        try:
+            return {k: dev.states[k] for k in dev.states}
+        except Exception:
+            return {}
+
+    def _disc_is_contact(self, dev, states):
+        """Return True if dev looks like a contact/door/window sensor."""
+        name_lower  = dev.name.lower()
+        name_match  = any(kw in name_lower for kw in _CONTACT_NAME_KEYWORDS)
+        state_match = bool(_CONTACT_STATE_NAMES & set(states.keys()))
+        return name_match or state_match
+
+    def _disc_config_entry(self, dev, states, commented=False):
+        """Return a JSON config file line for dev.
+
+        commented=True  prepends '# ' so the entry is disabled by default.
+        """
+        if "contact" in states:
+            state    = "contact"
+            on_text  = "CLOSED"
+            off_text = "OPEN"
+        else:
+            state    = "onState"
+            on_text  = "OPEN"
+            off_text = "CLOSED"
+        line = (
+            f'    {{"id": {dev.id}, "name": "{dev.name}", '
+            f'"state": "{state}", "label": "{dev.name}", '
+            f'"on_text": "{on_text}", "off_text": "{off_text}"}}'
+        )
+        return f"# {line}" if commented else line
 
     # ======================================
     # PRIVATE HELPERS

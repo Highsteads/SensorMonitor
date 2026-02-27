@@ -1,0 +1,20 @@
+<MenuItems>
+
+    <MenuItem id="discoverDevices">
+        <Name>Discover All Devices (generate config file)</Name>
+        <CallbackMethod>menuDiscoverDevices</CallbackMethod>
+    </MenuItem>
+
+    <MenuItem id="findContactSensors">
+        <Name>Find Contact Sensors</Name>
+        <CallbackMethod>menuFindContactSensors</CallbackMethod>
+    </MenuItem>
+
+    <MenuItem id="sep1"/>
+
+    <MenuItem id="reloadConfig">
+        <Name>Reload Config File</Name>
+        <CallbackMethod>menuReloadConfig</CallbackMethod>
+    </MenuItem>
+
+</MenuItems>

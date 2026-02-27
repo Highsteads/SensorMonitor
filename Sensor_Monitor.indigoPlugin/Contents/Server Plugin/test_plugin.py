@@ -4,7 +4,7 @@
 # Description: Mock test harness for Sensor Monitor plugin - no Indigo runtime needed
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        27-02-2026
-# Version:     1.2
+# Version:     1.3
 #
 # Run from Terminal:
 #   cd "/Library/Application Support/Perceptive Automation/Indigo 2025.1/Plugins"
@@ -25,20 +25,30 @@ from unittest.mock import MagicMock
 
 class MockDevice:
     """Simulates an Indigo device object."""
-    def __init__(self, dev_id, name, on_state=False, states=None):
-        self.id      = dev_id
-        self.name    = name
-        self.onState = on_state
-        self.states  = states or {}
+    def __init__(self, dev_id, name, on_state=False, states=None, enabled=True):
+        self.id       = dev_id
+        self.name     = name
+        self.onState  = on_state
+        self.states   = states or {}
+        self.enabled  = enabled
+        self.folderId = None  # no folder by default
 
     def __repr__(self):
         return f"MockDevice(id={self.id}, name='{self.name}', onState={self.onState})"
 
 
 class MockDevices(dict):
-    """Dict-like mock for indigo.devices - adds subscribeToChanges()."""
+    """Dict-like mock for indigo.devices - adds subscribeToChanges().
+
+    __iter__ yields device objects (values) so that discovery methods that
+    do 'for dev in indigo.devices:' receive MockDevice instances, matching
+    the behaviour of the real Indigo API.
+    """
     def subscribeToChanges(self):
         pass  # No-op in tests
+
+    def __iter__(self):
+        return iter(self.values())
 
 
 class MockVariable:
@@ -103,6 +113,13 @@ DEVICE_MONITOR   = _mod.DEVICE_MONITOR
 VARIABLE_MONITOR = _mod.VARIABLE_MONITOR
 CONFIG_PATH      = _mod.CONFIG_PATH
 
+# Redirect file paths to non-existent locations so tests never touch real
+# config/discovery files that may be present on the system.
+# Tests that exercise file I/O (TestConfigLoading, TestMenuCallbacks) pass
+# their own explicit temp-file paths to _load_config() or patch these vars.
+_mod.CONFIG_PATH           = "/nonexistent/test/path/sm_config.json"
+_mod.DISCOVERY_OUTPUT_PATH = "/nonexistent/test/path/sm_discovery.json"
+
 
 # ======================================
 # SHARED HELPERS
@@ -158,7 +175,7 @@ def make_plugin(prefs=None):
     return Plugin(
         "com.clives.indigoplugin.sensormonitor",
         "Sensor Monitor",
-        "1.3.0",
+        "1.4.0",
         prefs or {}
     )
 
@@ -909,6 +926,156 @@ class TestConfigLoading(unittest.TestCase):
             set(DEVICE_MONITOR.keys()),
             msg="Invalid JSON should trigger fallback to DEVICE_MONITOR"
         )
+
+
+# ======================================
+# TEST: MENU CALLBACKS
+# ======================================
+
+def make_contact_device_registry():
+    """Return a MockDevices registry that includes a contact sensor candidate."""
+    registry = make_device_registry()
+    # Add a device whose name contains 'door' so _disc_is_contact() recognises it
+    registry[555001] = MockDevice(555001, "Front Door Sensor",
+                                  on_state=False, states={"onState": False})
+    registry[555002] = MockDevice(555002, "Lounge Motion",
+                                  on_state=False, states={"onState": False})
+    return registry
+
+
+class TestMenuCallbacks(unittest.TestCase):
+
+    def setUp(self):
+        mock_indigo.server.log.reset_mock()
+        mock_indigo.devices   = make_contact_device_registry()
+        mock_indigo.variables = make_variable_registry()
+
+    # --- menuReloadConfig ---
+
+    def test_menu_reload_config_resets_to_defaults(self):
+        """menuReloadConfig reloads the config (falls back to defaults when no file)."""
+        plugin = make_plugin()
+        # Inject a spurious entry not in DEVICE_MONITOR
+        plugin.device_monitor[999999999] = [{"state": "onState", "label": "Ghost"}]
+        plugin.menuReloadConfig()
+        # After reload with no config file, extra key should be gone
+        self.assertNotIn(999999999, plugin.device_monitor,
+            msg="Reload should have reset device_monitor to DEVICE_MONITOR defaults")
+
+    def test_menu_reload_config_logs_counts(self):
+        """menuReloadConfig logs a summary showing old -> new device/variable counts."""
+        plugin = make_plugin()
+        plugin.menuReloadConfig()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertIn("->", info_text,
+            msg="Reload log should contain 'old -> new' counts")
+
+    def test_menu_reload_config_reruns_validation(self):
+        """menuReloadConfig re-validates devices (logs [OK] entries)."""
+        plugin = make_plugin()
+        plugin.logger.info.reset_mock()
+        plugin.menuReloadConfig()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertIn("[OK]", info_text,
+            msg="menuReloadConfig should re-run device validation")
+
+    # --- menuFindContactSensors ---
+
+    def test_menu_find_contact_sensors_logs_header(self):
+        """menuFindContactSensors logs the discovery header."""
+        plugin = make_plugin()
+        plugin.menuFindContactSensors()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertIn("Contact", info_text,
+            msg="Discovery header should mention 'Contact'")
+
+    def test_menu_find_contact_sensors_logs_candidate(self):
+        """menuFindContactSensors logs devices whose name contains a contact keyword."""
+        plugin = make_plugin()
+        plugin.menuFindContactSensors()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertIn("Front Door Sensor", info_text,
+            msg="Device with 'door' in name should be logged as a candidate")
+
+    def test_menu_find_contact_sensors_skips_non_contact(self):
+        """menuFindContactSensors does not log non-contact devices as candidates."""
+        plugin = make_plugin()
+        plugin.menuFindContactSensors()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertNotIn("Lounge Motion", info_text,
+            msg="Non-contact device 'Lounge Motion' should not appear in results")
+
+    # --- menuDiscoverDevices ---
+
+    def test_menu_discover_devices_logs_summary(self):
+        """menuDiscoverDevices logs a 'Discovery complete' summary line."""
+        plugin = make_plugin()
+        plugin.menuDiscoverDevices()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertIn("Discovery complete", info_text,
+            msg="menuDiscoverDevices should log a summary line")
+
+    def test_menu_discover_devices_writes_config_file(self):
+        """menuDiscoverDevices writes sensor_monitor_config.json."""
+        import shutil
+        tmpdir = tempfile.mkdtemp()
+        disc_path   = os.path.join(tmpdir, "device_discovery.json")
+        config_path = os.path.join(tmpdir, "sensor_monitor_config.json")
+
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = disc_path
+        _mod.CONFIG_PATH           = config_path
+
+        try:
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+
+            self.assertTrue(os.path.exists(disc_path),
+                msg="device_discovery.json should have been written")
+            self.assertTrue(os.path.exists(config_path),
+                msg="sensor_monitor_config.json should have been written")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_menu_discover_devices_config_contains_contact_candidate(self):
+        """The generated config file includes the contact sensor candidate as an active entry."""
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "sensor_monitor_config.json")
+
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+
+        try:
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+
+            # Front Door Sensor (ID 555001) should be an active (uncommented) entry
+            active_lines = [
+                l for l in content.splitlines()
+                if "555001" in l and not l.lstrip().startswith("#")
+            ]
+            self.assertTrue(len(active_lines) > 0,
+                msg=f"Contact candidate 555001 should appear as an active (uncommented) entry.\n"
+                    f"Config content:\n{content}")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ======================================

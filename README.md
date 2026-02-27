@@ -1,6 +1,6 @@
 # Sensor Monitor — Indigo Plugin
 
-**Version**: 1.3.0
+**Version**: 1.4.0
 **Author**: CliveS
 **Platform**: Indigo 2025.1 / macOS / Python 3.11
 **Plugin ID**: `com.clives.indigoplugin.sensormonitor`
@@ -26,6 +26,7 @@ changes required.
 - Custom ON/OFF labels per state (e.g. OPEN/CLOSED for door contacts)
 - Millisecond-precision timestamps in all log entries
 - **JSON config file** — edit outside the plugin, comment out entries with `#`, no Python needed
+- **Plugin menu** — Discover Devices, Find Contact Sensors, and Reload Config via Plugins > Sensor Monitor
 - **Discovery script** — scans all Indigo devices and generates a ready-to-use config file
 - **Variable monitoring** — logs Indigo variable value changes with `old -> new` format
 - **Startup validation** — warns about any configured device IDs not found in Indigo
@@ -238,6 +239,19 @@ maintain separate triggers or scripts per sensor.
 
 ---
 
+## Plugin Menu
+
+The following items are available under **Plugins > Sensor Monitor**:
+
+| Menu item | What it does |
+|-----------|--------------|
+| **Discover All Devices (generate config file)** | Scans every Indigo device, writes `device_discovery.json` (full inventory) and a fresh `sensor_monitor_config.json` (contact candidates active, all others commented out). Identical to running `discover_devices.py` in the Script Editor but runs from the menu with one click. |
+| **Find Contact Sensors** | Logs all contact/door/window sensor candidates to the Indigo event log with their ready-to-paste config entries. Useful for a quick check without regenerating the full config file. |
+| *(separator)* | |
+| **Reload Config File** | Re-reads `sensor_monitor_config.json` and re-validates all devices and variables — without a full plugin restart. Use this after editing the config file. |
+
+---
+
 ## File Structure
 
 ```
@@ -246,9 +260,10 @@ Sensor_Monitor.indigoPlugin/
 └── Contents/
     ├── Info.plist
     └── Server Plugin/
-        ├── plugin.py              # Main plugin code
-        ├── discover_devices.py    # Run once in Indigo Script Editor to generate config
-        ├── find_contact_sensors.py # Lightweight contact sensor finder (logs only)
+        ├── plugin.py              # Main plugin code — also contains all menu callbacks
+        ├── MenuItems.xml          # Defines the Plugins > Sensor Monitor menu items
+        ├── discover_devices.py    # Standalone Script Editor version of Discover Devices
+        ├── find_contact_sensors.py # Standalone Script Editor version of Find Contact Sensors
         └── test_plugin.py         # Mock test suite — run with: python3 test_plugin.py -v
 ```
 
@@ -268,6 +283,7 @@ plugin logic outside of the Indigo runtime environment.
 
 | Version | Date       | Change |
 |---------|------------|--------|
+| 1.4.0   | 2026-02-27 | Plugin menu — Discover All Devices, Find Contact Sensors, Reload Config File (MenuItems.xml + menu callbacks in plugin.py) |
 | 1.3.0   | 2026-02-27 | JSON config file support — sensor_monitor_config.json with # comment lines, discover_devices.py generates ready-to-use config |
 | 1.2.0   | 2026-02-27 | Variable monitoring — VARIABLE_MONITOR dict, variableUpdated(), variableDeleted() |
 | 1.1.0   | 2026-02-27 | Startup device validation, rename detection, deviceDeleted() warning, mock test suite |
