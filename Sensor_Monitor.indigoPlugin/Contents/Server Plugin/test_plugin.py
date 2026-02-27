@@ -4,7 +4,7 @@
 # Description: Mock test harness for Sensor Monitor plugin - no Indigo runtime needed
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        27-02-2026
-# Version:     1.1
+# Version:     1.2
 #
 # Run from Terminal:
 #   cd "/Library/Application Support/Perceptive Automation/Indigo 2025.1/Plugins"
@@ -13,6 +13,7 @@
 
 import sys
 import os
+import tempfile
 import unittest
 import importlib.util
 from unittest.mock import MagicMock
@@ -97,9 +98,10 @@ _spec        = importlib.util.spec_from_file_location("sensor_monitor_plugin", _
 _mod         = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
-Plugin          = _mod.Plugin
-DEVICE_MONITOR  = _mod.DEVICE_MONITOR
+Plugin           = _mod.Plugin
+DEVICE_MONITOR   = _mod.DEVICE_MONITOR
 VARIABLE_MONITOR = _mod.VARIABLE_MONITOR
+CONFIG_PATH      = _mod.CONFIG_PATH
 
 
 # ======================================
@@ -147,11 +149,16 @@ def make_variable_registry(missing_ids=None):
 
 
 def make_plugin(prefs=None):
-    """Instantiate the Plugin class with minimal prefs."""
+    """Instantiate the Plugin class with minimal prefs.
+
+    No config file is present in the test environment, so _load_config()
+    falls back to the module-level DEVICE_MONITOR / VARIABLE_MONITOR dicts.
+    Call plugin._load_config(path) afterwards to test file-based loading.
+    """
     return Plugin(
         "com.clives.indigoplugin.sensormonitor",
         "Sensor Monitor",
-        "1.2.0",
+        "1.3.0",
         prefs or {}
     )
 
@@ -286,7 +293,7 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
         mock_indigo.server.log.assert_not_called()
 
     def test_unmonitored_device_produces_no_log(self):
-        """Device ID not in DEVICE_MONITOR is silently ignored."""
+        """Device ID not in device_monitor is silently ignored."""
         orig = MockDevice(999999999, "Some Unrelated Device", on_state=False)
         new  = MockDevice(999999999, "Some Unrelated Device", on_state=True)
         self.plugin.deviceUpdated(orig, new)
@@ -563,7 +570,7 @@ class TestVariableUpdated(unittest.TestCase):
             msg=f"Expected '450 -> 520' in log. Got: {msgs}")
 
     def test_custom_label_used_in_log(self):
-        """Label from VARIABLE_MONITOR config appears in log instead of raw variable name."""
+        """Label from variable_monitor config appears in log instead of raw variable name."""
         orig = MockVariable(241032502, "Lux_Level", "100")
         new  = MockVariable(241032502, "Lux_Level", "200")
         self.plugin.variableUpdated(orig, new)
@@ -581,7 +588,7 @@ class TestVariableUpdated(unittest.TestCase):
         mock_indigo.server.log.assert_not_called()
 
     def test_unmonitored_variable_ignored(self):
-        """Variable not in VARIABLE_MONITOR is silently ignored."""
+        """Variable not in variable_monitor is silently ignored."""
         orig = MockVariable(999999999, "Some_Other_Var", "a")
         new  = MockVariable(999999999, "Some_Other_Var", "b")
         self.plugin.variableUpdated(orig, new)
@@ -630,12 +637,287 @@ class TestVariableDeleted(unittest.TestCase):
 
 
 # ======================================
+# TEST: JSON CONFIG LOADING
+# ======================================
+
+class TestConfigLoading(unittest.TestCase):
+    """Verify _load_config() correctly reads sensor_monitor_config.json."""
+
+    def setUp(self):
+        mock_indigo.server.log.reset_mock()
+        mock_indigo.devices   = make_device_registry()
+        mock_indigo.variables = make_variable_registry()
+        self._tmp_files = []
+
+    def tearDown(self):
+        for path in self._tmp_files:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    def _write_config(self, content):
+        """Write content to a temp file and return the path."""
+        fd, path = tempfile.mkstemp(suffix=".json", prefix="sm_test_")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        self._tmp_files.append(path)
+        return path
+
+    # --- Fallback behaviour ---
+
+    def test_fallback_when_no_file(self):
+        """When no config file exists, falls back to DEVICE_MONITOR / VARIABLE_MONITOR."""
+        plugin = make_plugin()
+        # No file at default path - plugin should mirror the module-level dicts
+        self.assertEqual(
+            set(plugin.device_monitor.keys()),
+            set(DEVICE_MONITOR.keys()),
+            msg="device_monitor keys should match DEVICE_MONITOR fallback"
+        )
+        self.assertEqual(
+            set(plugin.variable_monitor.keys()),
+            set(VARIABLE_MONITOR.keys()),
+            msg="variable_monitor keys should match VARIABLE_MONITOR fallback"
+        )
+
+    def test_fallback_is_deep_copy(self):
+        """Fallback dicts are independent copies - mutating one does not affect the other."""
+        plugin = make_plugin()
+        plugin.device_monitor[999999999] = [{"state": "onState", "label": "Test"}]
+        self.assertNotIn(999999999, DEVICE_MONITOR,
+            msg="Mutating device_monitor should not alter module-level DEVICE_MONITOR")
+
+    # --- Device loading ---
+
+    def test_devices_loaded_from_json(self):
+        """Devices section of JSON is loaded into self.device_monitor."""
+        config = '''{
+  "devices": [
+    {"id": 111111, "state": "onState", "label": "Test Device"}
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        self.assertIn(111111, plugin.device_monitor,
+            msg="Device ID 111111 should be in device_monitor")
+        self.assertEqual(plugin.device_monitor[111111][0]["label"], "Test Device")
+
+    def test_variables_loaded_from_json(self):
+        """Variables section of JSON is loaded into self.variable_monitor."""
+        config = '''{
+  "devices": [],
+  "variables": [
+    {"id": 222222, "label": "Test Var"}
+  ]
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        self.assertIn(222222, plugin.variable_monitor,
+            msg="Variable ID 222222 should be in variable_monitor")
+        self.assertEqual(plugin.variable_monitor[222222]["label"], "Test Var")
+
+    # --- Comment stripping ---
+
+    def test_comment_lines_ignored(self):
+        """Lines starting with # are stripped before JSON parsing."""
+        config = '''{
+  "devices": [
+    {"id": 111111, "state": "onState", "label": "Active Device"},
+# {"id": 222222, "state": "onState", "label": "Disabled Device"}
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        self.assertIn(111111, plugin.device_monitor,
+            msg="Active device should be present")
+        self.assertNotIn(222222, plugin.device_monitor,
+            msg="Commented-out device should be absent")
+
+    def test_indented_comment_lines_ignored(self):
+        """Lines with leading whitespace before # are also treated as comments."""
+        config = '''{
+  "devices": [
+    {"id": 111111, "state": "onState", "label": "Active"},
+    # {"id": 333333, "state": "onState", "label": "Indented Comment"}
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        self.assertIn(111111, plugin.device_monitor)
+        self.assertNotIn(333333, plugin.device_monitor)
+
+    # --- Trailing comma handling ---
+
+    def test_trailing_comma_in_devices_handled(self):
+        """Trailing comma after last device entry does not cause parse error."""
+        config = '''{
+  "devices": [
+    {"id": 111111, "state": "onState", "label": "Test"},
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)  # Should not raise
+
+        self.assertIn(111111, plugin.device_monitor)
+
+    def test_trailing_comma_in_variables_handled(self):
+        """Trailing comma after last variable entry does not cause parse error."""
+        config = '''{
+  "devices": [],
+  "variables": [
+    {"id": 222222, "label": "Var"},
+  ]
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)  # Should not raise
+
+        self.assertIn(222222, plugin.variable_monitor)
+
+    # --- Multi-state devices ---
+
+    def test_multi_state_device_grouped_by_id(self):
+        """Multiple entries with the same device ID are grouped into a list."""
+        config = '''{
+  "devices": [
+    {"id": 111111, "state": "pirDetection", "label": "PIR"},
+    {"id": 111111, "state": "presence",     "label": "mmWave Presence"}
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        self.assertIn(111111, plugin.device_monitor)
+        self.assertEqual(len(plugin.device_monitor[111111]), 2,
+            msg="Two entries for same ID should produce a list of 2 configs")
+        labels = [c["label"] for c in plugin.device_monitor[111111]]
+        self.assertIn("PIR", labels)
+        self.assertIn("mmWave Presence", labels)
+
+    # --- on_text / off_text ---
+
+    def test_custom_on_off_text_preserved(self):
+        """on_text and off_text from JSON are preserved in state config."""
+        config = '''{
+  "devices": [
+    {"id": 111111, "state": "onState", "label": "Door",
+     "on_text": "OPEN", "off_text": "CLOSED"}
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        cfg = plugin.device_monitor[111111][0]
+        self.assertEqual(cfg.get("on_text"),  "OPEN")
+        self.assertEqual(cfg.get("off_text"), "CLOSED")
+
+    # --- name as label fallback ---
+
+    def test_name_used_as_label_fallback(self):
+        """If label is absent, the name field is used as the label."""
+        config = '''{
+  "devices": [
+    {"id": 111111, "name": "My Sensor Name", "state": "onState"}
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        label = plugin.device_monitor[111111][0]["label"]
+        self.assertEqual(label, "My Sensor Name",
+            msg="name should be used when label is absent")
+
+    # --- Integration: loaded config works in callbacks ---
+
+    def test_json_loaded_config_works_in_deviceupdated(self):
+        """deviceUpdated() correctly uses config loaded from JSON file."""
+        config = '''{
+  "devices": [
+    {"id": 333333, "state": "onState", "label": "JSON Label"}
+  ],
+  "variables": []
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        mock_indigo.server.log.reset_mock()
+        orig = MockDevice(333333, "JSON Test Device", on_state=False)
+        new  = MockDevice(333333, "JSON Test Device", on_state=True)
+        plugin.deviceUpdated(orig, new)
+
+        msgs = server_log_messages()
+        self.assertTrue(
+            any("JSON Test Device" in m and "JSON Label" in m for m in msgs),
+            msg=f"Expected JSON-configured label in log. Got: {msgs}"
+        )
+
+    def test_json_loaded_config_works_in_variableupdated(self):
+        """variableUpdated() correctly uses config loaded from JSON file."""
+        config = '''{
+  "devices": [],
+  "variables": [
+    {"id": 444444, "label": "JSON Var Label"}
+  ]
+}'''
+        path   = self._write_config(config)
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        mock_indigo.server.log.reset_mock()
+        orig = MockVariable(444444, "some_var", "10")
+        new  = MockVariable(444444, "some_var", "20")
+        plugin.variableUpdated(orig, new)
+
+        msgs = server_log_messages()
+        self.assertTrue(
+            any("JSON Var Label" in m and "10" in m and "20" in m for m in msgs),
+            msg=f"Expected JSON-configured variable label in log. Got: {msgs}"
+        )
+
+    # --- Error resilience ---
+
+    def test_invalid_json_falls_back_to_defaults(self):
+        """Malformed JSON causes fallback to DEVICE_MONITOR / VARIABLE_MONITOR."""
+        path   = self._write_config("{ this is not valid json }")
+        plugin = make_plugin()
+        plugin._load_config(path)
+
+        # Should fall back silently
+        self.assertEqual(
+            set(plugin.device_monitor.keys()),
+            set(DEVICE_MONITOR.keys()),
+            msg="Invalid JSON should trigger fallback to DEVICE_MONITOR"
+        )
+
+
+# ======================================
 # ENTRY POINT
 # ======================================
 
 if __name__ == "__main__":
     print(f"\nSensor Monitor Plugin - Mock Test Suite")
     print(f"plugin.py: {_plugin_path}")
-    print(f"Monitored devices in DEVICE_MONITOR:   {len(DEVICE_MONITOR)}")
+    print(f"Monitored devices in DEVICE_MONITOR:    {len(DEVICE_MONITOR)}")
     print(f"Monitored variables in VARIABLE_MONITOR: {len(VARIABLE_MONITOR)}\n")
     unittest.main(verbosity=2)

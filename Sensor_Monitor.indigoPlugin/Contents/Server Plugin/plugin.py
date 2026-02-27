@@ -4,17 +4,41 @@
 # Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        27-02-2026
-# Version:     1.2
+# Version:     1.3.0
 
 try:
     import indigo
 except ImportError:
     pass
 
+import json
+import os
+import re
 from datetime import datetime
 
 # ======================================
-# DEVICE MONITOR CONFIGURATION
+# CONFIG FILE PATH
+#
+# If this file exists the plugin loads its device and variable lists from it,
+# instead of from the hardcoded DEVICE_MONITOR / VARIABLE_MONITOR dicts below.
+#
+# The file supports # comment lines to disable individual entries without
+# deleting them.  Run discover_devices.py in the Indigo Script Editor to
+# generate an initial config file, then edit as needed.
+#
+# Reload the plugin after saving changes:
+#   Plugins > Sensor Monitor > Reload Plugin
+# ======================================
+
+CONFIG_PATH = os.path.expanduser(
+    "~/Documents/Indigo/SensorMonitor/sensor_monitor_config.json"
+)
+
+# ======================================
+# DEVICE MONITOR CONFIGURATION  (FALLBACK)
+#
+# Used only when sensor_monitor_config.json does not exist.
+# Once a config file is in place these dicts are ignored.
 #
 # Key   = Indigo device ID (int)
 # Value = list of state configs to monitor for that device
@@ -50,10 +74,19 @@ DEVICE_MONITOR = {
     408117572:  [{"state": "onState",       "label": "mmWave Presence"}],
     1256890181: [{"state": "onState",       "label": "mmWave Presence"}],
     1807623843: [{"state": "onState",       "label": "mmWave Presence"}],
+
+    # --- Window / Door Contacts ---
+    # Replace 0 with your actual Indigo device IDs.
+    # on_text / off_text customise the log label for True / False states.
+    # 0: [{"state": "onState", "label": "Front Door",  "on_text": "OPEN", "off_text": "CLOSED"}],
+    # 0: [{"state": "onState", "label": "Back Door",   "on_text": "OPEN", "off_text": "CLOSED"}],
+    # 0: [{"state": "onState", "label": "Lounge Window","on_text": "OPEN", "off_text": "CLOSED"}],
 }
 
 # ======================================
-# VARIABLE MONITOR CONFIGURATION
+# VARIABLE MONITOR CONFIGURATION  (FALLBACK)
+#
+# Used only when sensor_monitor_config.json does not exist.
 #
 # Key   = Indigo variable ID (int)
 # Value = config dict
@@ -68,6 +101,8 @@ DEVICE_MONITOR = {
 # ======================================
 VARIABLE_MONITOR = {
 
+    # Variables log value changes as: [ts] Label: old_value -> new_value
+    # "label" is optional - defaults to variable name if omitted
     241032502: {"label": "Lux Level"},
 }
 
@@ -81,13 +116,15 @@ class Plugin(indigo.PluginBase):
     def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self.debug = pluginPrefs.get("showDebugInfo", False)
+        self._load_config()
 
     def startup(self):
         indigo.devices.subscribeToChanges()
         indigo.variables.subscribeToChanges()
         self.logger.info(
             f"Sensor Monitor {self.pluginVersion} started - "
-            f"monitoring {len(DEVICE_MONITOR)} devices, {len(VARIABLE_MONITOR)} variables"
+            f"monitoring {len(self.device_monitor)} devices, "
+            f"{len(self.variable_monitor)} variables"
         )
         self._validate_monitored_devices()
         self._validate_monitored_variables()
@@ -102,7 +139,7 @@ class Plugin(indigo.PluginBase):
     def deviceUpdated(self, origDev, newDev):
         super().deviceUpdated(origDev, newDev)
 
-        if newDev.id not in DEVICE_MONITOR:
+        if newDev.id not in self.device_monitor:
             return
 
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
@@ -115,7 +152,7 @@ class Plugin(indigo.PluginBase):
             )
 
         # --- State change logging ---
-        for config in DEVICE_MONITOR[newDev.id]:
+        for config in self.device_monitor[newDev.id]:
             state_name = config["state"]
 
             try:
@@ -150,13 +187,14 @@ class Plugin(indigo.PluginBase):
     def deviceDeleted(self, dev):
         super().deviceDeleted(dev)
 
-        if dev.id not in DEVICE_MONITOR:
+        if dev.id not in self.device_monitor:
             return
 
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.warning(
             f"[{timestamp}] [Sensor Monitor] WARNING - Monitored device deleted: "
-            f"'{dev.name}' (ID: {dev.id}) - remove from DEVICE_MONITOR in plugin.py"
+            f"'{dev.name}' (ID: {dev.id}) - "
+            f"remove from config file or DEVICE_MONITOR in plugin.py"
         )
 
     # ======================================
@@ -166,7 +204,7 @@ class Plugin(indigo.PluginBase):
     def variableUpdated(self, origVar, newVar):
         super().variableUpdated(origVar, newVar)
 
-        if newVar.id not in VARIABLE_MONITOR:
+        if newVar.id not in self.variable_monitor:
             return
 
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
@@ -182,7 +220,7 @@ class Plugin(indigo.PluginBase):
         if origVar.value == newVar.value:
             return
 
-        config = VARIABLE_MONITOR[newVar.id]
+        config = self.variable_monitor[newVar.id]
         label  = config.get("label", newVar.name)
 
         indigo.server.log(
@@ -196,25 +234,108 @@ class Plugin(indigo.PluginBase):
     def variableDeleted(self, var):
         super().variableDeleted(var)
 
-        if var.id not in VARIABLE_MONITOR:
+        if var.id not in self.variable_monitor:
             return
 
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.warning(
             f"[{timestamp}] [Sensor Monitor] WARNING - Monitored variable deleted: "
-            f"'{var.name}' (ID: {var.id}) - remove from VARIABLE_MONITOR in plugin.py"
+            f"'{var.name}' (ID: {var.id}) - "
+            f"remove from config file or VARIABLE_MONITOR in plugin.py"
         )
 
     # ======================================
     # PRIVATE HELPERS
     # ======================================
 
+    def _load_config(self, config_path=None):
+        """Load device and variable monitor lists from the JSON config file.
+
+        If the config file does not exist, falls back to the hardcoded
+        DEVICE_MONITOR and VARIABLE_MONITOR dicts defined at module level.
+
+        The JSON file supports comment lines: any line whose first
+        non-whitespace character is # is stripped before parsing.
+        Trailing commas before ] or } are silently cleaned up so the
+        file is easier to edit by hand.
+
+        config_path  optional path override (used by tests).
+        """
+        path = config_path or CONFIG_PATH
+
+        if not os.path.exists(path):
+            # No config file - use the module-level fallback dicts (deep copy)
+            self.device_monitor   = {k: [dict(s) for s in v]
+                                     for k, v in DEVICE_MONITOR.items()}
+            self.variable_monitor = {k: dict(v)
+                                     for k, v in VARIABLE_MONITOR.items()}
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            # Strip comment lines (first non-whitespace char is #)
+            active_lines = [l for l in lines if not l.lstrip().startswith("#")]
+            json_str     = "".join(active_lines)
+
+            # Remove trailing commas before ] or } (not valid JSON)
+            json_str = re.sub(r",(\s*[}\]])", r"\1", json_str)
+
+            config = json.loads(json_str)
+
+        except Exception as e:
+            # File exists but unreadable or invalid - fall back and warn
+            self.device_monitor   = {k: [dict(s) for s in v]
+                                     for k, v in DEVICE_MONITOR.items()}
+            self.variable_monitor = {k: dict(v)
+                                     for k, v in VARIABLE_MONITOR.items()}
+            try:
+                self.logger.warning(
+                    f"[Sensor Monitor] Could not read config file: {e} - "
+                    f"using hardcoded fallback dicts"
+                )
+            except Exception:
+                pass  # logger may not be ready during __init__
+            return
+
+        # --- Build self.device_monitor from "devices" list ---
+        self.device_monitor = {}
+        for entry in config.get("devices", []):
+            dev_id     = int(entry["id"])
+            state_conf = {
+                "state": entry.get("state", "onState"),
+                "label": entry.get("label", entry.get("name", f"Device {dev_id}")),
+            }
+            if "on_text"  in entry:
+                state_conf["on_text"]  = entry["on_text"]
+            if "off_text" in entry:
+                state_conf["off_text"] = entry["off_text"]
+            self.device_monitor.setdefault(dev_id, []).append(state_conf)
+
+        # --- Build self.variable_monitor from "variables" list ---
+        self.variable_monitor = {}
+        for entry in config.get("variables", []):
+            var_id = int(entry["id"])
+            self.variable_monitor[var_id] = {
+                "label": entry.get("label", entry.get("name", f"Variable {var_id}"))
+            }
+
+        try:
+            self.logger.info(
+                f"[Sensor Monitor] Config loaded from: {path} "
+                f"({len(self.device_monitor)} devices, "
+                f"{len(self.variable_monitor)} variables)"
+            )
+        except Exception:
+            pass  # logger may not be ready during __init__
+
     def _validate_monitored_devices(self):
-        """Check all DEVICE_MONITOR entries exist in Indigo at startup."""
+        """Check all device_monitor entries exist in Indigo at startup."""
         missing = []
         found   = []
 
-        for device_id in DEVICE_MONITOR:
+        for device_id in self.device_monitor:
             if device_id in indigo.devices:
                 found.append(f"  [OK] {indigo.devices[device_id].name} (ID: {device_id})")
             else:
@@ -229,20 +350,20 @@ class Plugin(indigo.PluginBase):
                 self.logger.warning(entry)
             self.logger.warning(
                 f"[Sensor Monitor] {len(missing)} monitored device(s) not found - "
-                f"check IDs in DEVICE_MONITOR in plugin.py"
+                f"check IDs in config file or DEVICE_MONITOR in plugin.py"
             )
         else:
             self.logger.info("[Sensor Monitor] All monitored devices validated OK")
 
     def _validate_monitored_variables(self):
-        """Check all VARIABLE_MONITOR entries exist in Indigo at startup."""
-        if not VARIABLE_MONITOR:
+        """Check all variable_monitor entries exist in Indigo at startup."""
+        if not self.variable_monitor:
             return
 
         missing = []
         found   = []
 
-        for var_id in VARIABLE_MONITOR:
+        for var_id in self.variable_monitor:
             if var_id in indigo.variables:
                 found.append(f"  [OK] {indigo.variables[var_id].name} (ID: {var_id})")
             else:
@@ -257,7 +378,7 @@ class Plugin(indigo.PluginBase):
                 self.logger.warning(entry)
             self.logger.warning(
                 f"[Sensor Monitor] {len(missing)} monitored variable(s) not found - "
-                f"check IDs in VARIABLE_MONITOR in plugin.py"
+                f"check IDs in config file or VARIABLE_MONITOR in plugin.py"
             )
         else:
             self.logger.info("[Sensor Monitor] All monitored variables validated OK")
