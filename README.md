@@ -133,28 +133,20 @@ If a device ID is not found:
 
 ---
 
-## Removing Individual Triggers and Scripts
+## Migrating from Triggers and Scripts
 
-Once the plugin is confirmed working, the following can be retired:
+If you currently monitor sensors using individual Indigo triggers or standalone Python
+scripts, this plugin replaces all of them with a single subscription.
 
-**Indigo triggers** — remove any triggers that fire on state changes for the 10 monitored
-devices. The plugin handles all logging for them directly.
+Once the plugin is confirmed working:
 
-**Python scripts** — the following standalone scripts are superseded by this plugin:
+- **Remove Indigo triggers** that fire on state changes for your monitored devices —
+  the plugin handles all logging for them directly
+- **Retire any per-sensor scripts** that log or react to individual device state changes —
+  add those devices to `DEVICE_MONITOR` instead
 
-| Script                          | Replaced by |
-|---------------------------------|-------------|
-| Bathroom_Basin_Occupancy.py     | Basin Occupancy Sensor — onState |
-| Bathroom_Basin_PIR.py           | Basin mmWave Sensor — pirDetection |
-| Bathroom_Basin_Presence.py      | Basin mmWave Sensor — presence |
-| Bathroom_Door_Occupancy.py      | Door Occupancy Sensor — onState |
-| Bathroom_Door_Contact.py        | Bathroom Door Contact — onState (OPEN/CLOSED) |
-| Kitchen_Left_Occupancy.py       | Kitchen Left mmWave — presence |
-| Kitchen_FP2_Presence.py         | Kitchen FP2 — onState |
-| Utility_Room_Occupancy.py       | Utility Room Occupancy — onState |
-| Living_Room_FP2_Presence_1.py   | Living Room FP2 Zone 1 — onState |
-| Living_Room_FP2_Presence_2.py   | Living Room FP2 Zone 2 — onState |
-| Living_Room_Moes_Presence.py    | Living Room Moes — onState |
+The plugin processes every device in `DEVICE_MONITOR` from one callback, so there is no
+need to maintain separate triggers or scripts per sensor.
 
 ---
 
