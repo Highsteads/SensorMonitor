@@ -33,18 +33,12 @@ no code changes required.
 
 ## Sensors Currently Monitored
 
-| Room            | Device                              | State(s)                    |
-|-----------------|-------------------------------------|-----------------------------|
-| Bathroom Basin  | Basin Occupancy Sensor              | onState                     |
-| Bathroom Basin  | Z Bathroom Basin Occupancy (FP300)  | pirDetection, presence      |
-| Bathroom Door   | Door PIR Occupancy Sensor           | onState                     |
-| Bathroom Door   | Door Contact Sensor                 | onState (OPEN/CLOSED)       |
-| Kitchen         | Kitchen Left Occupancy Sensor       | presence                    |
-| Kitchen         | Kitchen FP2 Presence Sensor         | onState                     |
-| Kitchen         | Utility Room PIR Occupancy Sensor   | onState                     |
-| Living Room     | FP2 Presence Sensor 1               | onState                     |
-| Living Room     | FP2 Presence Sensor 2               | onState                     |
-| Living Room     | Moes Presence Sensor                | onState                     |
+The plugin monitors whichever devices you configure in `DEVICE_MONITOR` inside
+`plugin.py`. The example configuration included covers occupancy sensors, mmWave
+presence sensors, and a door contact sensor across several rooms — but you can monitor
+any Indigo device and any of its states.
+
+See [Adding a New Sensor](#adding-a-new-sensor) below for how to configure your own devices.
 
 ---
 
