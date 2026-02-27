@@ -1,10 +1,10 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
 # Filename:    plugin.py
-# Description: Sensor Monitor - subscribes to all device state changes and logs sensor events
+# Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        27-02-2026
-# Version:     1.1
+# Version:     1.2
 
 try:
     import indigo
@@ -52,6 +52,25 @@ DEVICE_MONITOR = {
     1807623843: [{"state": "onState",       "label": "mmWave Presence"}],
 }
 
+# ======================================
+# VARIABLE MONITOR CONFIGURATION
+#
+# Key   = Indigo variable ID (int)
+# Value = config dict
+#
+# Each config:
+#   "label" : optional - text shown in log (defaults to variable.name if omitted)
+#
+# Log format: [HH:MM:SS.mmm] Label: old_value -> new_value
+#
+# Variable ID can be found by right-clicking the variable in Indigo
+# and choosing "Copy Variable ID to Clipboard".
+# ======================================
+VARIABLE_MONITOR = {
+
+    241032502: {"label": "Lux Level"},
+}
+
 
 class Plugin(indigo.PluginBase):
 
@@ -65,11 +84,13 @@ class Plugin(indigo.PluginBase):
 
     def startup(self):
         indigo.devices.subscribeToChanges()
+        indigo.variables.subscribeToChanges()
         self.logger.info(
             f"Sensor Monitor {self.pluginVersion} started - "
-            f"monitoring {len(DEVICE_MONITOR)} devices"
+            f"monitoring {len(DEVICE_MONITOR)} devices, {len(VARIABLE_MONITOR)} variables"
         )
         self._validate_monitored_devices()
+        self._validate_monitored_variables()
 
     def shutdown(self):
         self.logger.info("Sensor Monitor stopped")
@@ -139,6 +160,52 @@ class Plugin(indigo.PluginBase):
         )
 
     # ======================================
+    # VARIABLE CHANGE CALLBACK
+    # ======================================
+
+    def variableUpdated(self, origVar, newVar):
+        super().variableUpdated(origVar, newVar)
+
+        if newVar.id not in VARIABLE_MONITOR:
+            return
+
+        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+
+        # --- Name change detection ---
+        if origVar.name != newVar.name:
+            indigo.server.log(
+                f"[{timestamp}] [Sensor Monitor] Variable renamed: "
+                f"'{origVar.name}' -> '{newVar.name}' (ID: {newVar.id})"
+            )
+
+        # --- Value change logging ---
+        if origVar.value == newVar.value:
+            return
+
+        config = VARIABLE_MONITOR[newVar.id]
+        label  = config.get("label", newVar.name)
+
+        indigo.server.log(
+            f"[{timestamp}] {label}: {origVar.value} -> {newVar.value}"
+        )
+
+    # ======================================
+    # VARIABLE DELETED CALLBACK
+    # ======================================
+
+    def variableDeleted(self, var):
+        super().variableDeleted(var)
+
+        if var.id not in VARIABLE_MONITOR:
+            return
+
+        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        self.logger.warning(
+            f"[{timestamp}] [Sensor Monitor] WARNING - Monitored variable deleted: "
+            f"'{var.name}' (ID: {var.id}) - remove from VARIABLE_MONITOR in plugin.py"
+        )
+
+    # ======================================
     # PRIVATE HELPERS
     # ======================================
 
@@ -166,3 +233,31 @@ class Plugin(indigo.PluginBase):
             )
         else:
             self.logger.info("[Sensor Monitor] All monitored devices validated OK")
+
+    def _validate_monitored_variables(self):
+        """Check all VARIABLE_MONITOR entries exist in Indigo at startup."""
+        if not VARIABLE_MONITOR:
+            return
+
+        missing = []
+        found   = []
+
+        for var_id in VARIABLE_MONITOR:
+            if var_id in indigo.variables:
+                found.append(f"  [OK] {indigo.variables[var_id].name} (ID: {var_id})")
+            else:
+                missing.append(f"  [!]  ID {var_id} - not found in Indigo")
+
+        self.logger.info(f"[Sensor Monitor] Variable validation - {len(found)} found, {len(missing)} missing:")
+        for entry in found:
+            self.logger.info(entry)
+
+        if missing:
+            for entry in missing:
+                self.logger.warning(entry)
+            self.logger.warning(
+                f"[Sensor Monitor] {len(missing)} monitored variable(s) not found - "
+                f"check IDs in VARIABLE_MONITOR in plugin.py"
+            )
+        else:
+            self.logger.info("[Sensor Monitor] All monitored variables validated OK")

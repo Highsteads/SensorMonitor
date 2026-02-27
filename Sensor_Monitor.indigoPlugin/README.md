@@ -165,6 +165,7 @@ plugin logic outside of the Indigo runtime environment.
 
 | Version | Date       | Change |
 |---------|------------|--------|
+| 1.2.0   | 2026-02-27 | Variable monitoring — VARIABLE_MONITOR dict, variableUpdated(), variableDeleted() |
 | 1.1.0   | 2026-02-27 | Startup device validation, rename detection, deviceDeleted() warning, mock test suite |
 | 1.0.0   | 2026-02-27 | Initial release — subscribeToChanges, multi-state per device, custom on/off labels |
 
