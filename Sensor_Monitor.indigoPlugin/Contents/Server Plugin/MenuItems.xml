@@ -6,7 +6,7 @@
     </MenuItem>
 
     <MenuItem id="findContactSensors">
-        <Name>Find Contact Sensors</Name>
+        <Name>Find Contact &amp; Motion Sensors</Name>
         <CallbackMethod>menuFindContactSensors</CallbackMethod>
     </MenuItem>
 

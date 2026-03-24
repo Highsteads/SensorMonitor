@@ -4,7 +4,7 @@
 # Description: Mock test harness for Sensor Monitor plugin - no Indigo runtime needed
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        27-02-2026
-# Version:     1.3
+# Version:     1.12
 #
 # Run from Terminal:
 #   cd "/Library/Application Support/Perceptive Automation/Indigo 2025.1/Plugins"
@@ -25,16 +25,37 @@ from unittest.mock import MagicMock
 
 class MockDevice:
     """Simulates an Indigo device object."""
-    def __init__(self, dev_id, name, on_state=False, states=None, enabled=True):
+    def __init__(self, dev_id, name, on_state=False, states=None, enabled=True, plugin_id=""):
         self.id       = dev_id
         self.name     = name
         self.onState  = on_state
         self.states   = states or {}
         self.enabled  = enabled
         self.folderId = None  # no folder by default
+        self.pluginId = plugin_id
 
     def __repr__(self):
         return f"MockDevice(id={self.id}, name='{self.name}', onState={self.onState})"
+
+
+class MockThermostatDevice:
+    """Simulates an Indigo ThermostatDevice - intentionally has NO onState attribute.
+
+    Used to verify that discovery helpers correctly exclude non-binary device
+    types (thermostats, plain button devices) from contact sensor candidates,
+    even when their names contain keywords like 'door' or 'garage'.
+    """
+    def __init__(self, dev_id, name, states=None, enabled=True, plugin_id=""):
+        self.id       = dev_id
+        self.name     = name
+        self.states   = states or {}
+        self.enabled  = enabled
+        self.folderId = None
+        self.pluginId = plugin_id
+        # Note: intentionally no self.onState attribute
+
+    def __repr__(self):
+        return f"MockThermostatDevice(id={self.id}, name='{self.name}')"
 
 
 class MockDevices(dict):
@@ -309,12 +330,58 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
 
         mock_indigo.server.log.assert_not_called()
 
+    def test_label_same_as_device_name_not_duplicated(self):
+        """When label equals device name, name is printed once, not twice.
+
+        Discovery-generated configs set label to the device name, so
+        'Side Passage Motion' should log as '[ts] Side Passage Motion OFF',
+        not '[ts] Side Passage Motion Side Passage Motion OFF'.
+        """
+        self.plugin.device_monitor[333333] = [{"state": "onState", "label": "My Test Sensor"}]
+        orig = MockDevice(333333, "My Test Sensor", on_state=True)
+        new  = MockDevice(333333, "My Test Sensor", on_state=False)
+        self.plugin.deviceUpdated(orig, new)
+
+        msgs = server_log_messages()
+        self.assertFalse(
+            any("My Test Sensor My Test Sensor" in m for m in msgs),
+            msg=f"Device name should not appear twice. Got: {msgs}"
+        )
+        self.assertTrue(
+            any("My Test Sensor" in m and m.endswith("OFF") for m in msgs),
+            msg=f"Expected single name + state. Got: {msgs}"
+        )
+
+    def test_label_different_from_device_name_both_shown(self):
+        """When label differs from device name, both are included in the log."""
+        orig = MockDevice(812537401, "Basin Occupancy Sensor", on_state=False)
+        new  = MockDevice(812537401, "Basin Occupancy Sensor", on_state=True)
+        self.plugin.deviceUpdated(orig, new)
+
+        msgs = server_log_messages()
+        self.assertTrue(
+            any("Basin Occupancy Sensor" in m and "Occupancy" in m for m in msgs),
+            msg=f"Expected device name + label. Got: {msgs}"
+        )
+
     def test_unmonitored_device_produces_no_log(self):
         """Device ID not in device_monitor is silently ignored."""
         orig = MockDevice(999999999, "Some Unrelated Device", on_state=False)
         new  = MockDevice(999999999, "Some Unrelated Device", on_state=True)
         self.plugin.deviceUpdated(orig, new)
 
+        mock_indigo.server.log.assert_not_called()
+
+    def test_device_without_onstate_produces_no_error(self):
+        """deviceUpdated with state='onState' but device lacking onState does not log
+        an error.  getattr(dev, 'onState', None) returns None for both old and new,
+        they are equal, so nothing is logged (no error, no state log)."""
+        # Manually inject a ThermostatDevice into device_monitor
+        self.plugin.device_monitor[555003] = [{"state": "onState", "label": "TRV"}]
+        trv = MockThermostatDevice(555003, "Living Room Door TRV")
+        self.plugin.deviceUpdated(trv, trv)
+
+        self.plugin.logger.error.assert_not_called()
         mock_indigo.server.log.assert_not_called()
 
 
@@ -929,16 +996,383 @@ class TestConfigLoading(unittest.TestCase):
 
 
 # ======================================
+# TEST: DISCOVERY FILTER (_disc_is_contact)
+# ======================================
+
+class TestDiscoveryFilter(unittest.TestCase):
+    """Verify _disc_is_contact() correctly excludes non-binary device types.
+
+    The fix requires devices to have onState before name-keyword matching
+    applies.  Contact state names (contact, doorSensor, windowSensor) always
+    qualify regardless of device type.
+    """
+
+    def setUp(self):
+        mock_indigo.devices   = make_device_registry()
+        mock_indigo.variables = make_variable_registry()
+        self.plugin = make_plugin()
+
+    def test_sensor_with_door_keyword_and_onstate_is_candidate(self):
+        """Device with onState + 'door' keyword IS a contact candidate."""
+        dev    = MockDevice(111, "Front Door Sensor", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states))
+
+    def test_thermostat_with_door_keyword_is_not_candidate(self):
+        """ThermostatDevice (no onState) with 'door' keyword is NOT a candidate."""
+        dev    = MockThermostatDevice(222, "Living Room Door Radiator")
+        states = {"setpointCool": 20, "setpointHeat": 18}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states))
+
+    def test_plain_device_with_garage_keyword_is_not_candidate(self):
+        """Plain Device (no onState) with 'garage' keyword is NOT a candidate."""
+        dev    = MockThermostatDevice(333, "Z Garage Freezer Light Switch Button")
+        states = {"buttonGroupCount": 1}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states))
+
+    def test_device_with_contact_state_is_candidate_regardless_of_type(self):
+        """Device with 'contact' state name IS a candidate even without onState."""
+        dev    = MockThermostatDevice(444, "Some Weird Device")
+        states = {"contact": True, "battery": 80}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states))
+
+    def test_device_with_doorSensor_state_is_candidate(self):
+        """Device with 'doorSensor' state name IS a candidate."""
+        dev    = MockThermostatDevice(445, "Unlabelled Sensor")
+        states = {"doorSensor": False}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states))
+
+    def test_non_contact_name_without_onstate_is_not_candidate(self):
+        """Device with no contact keywords and no onState is not flagged."""
+        dev    = MockThermostatDevice(555, "Utility Room Radiator")
+        states = {"setpointHeat": 18}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states))
+
+    def test_lounge_motion_with_onstate_is_not_candidate(self):
+        """'Lounge Motion' has onState but no contact keywords - not a candidate."""
+        dev    = MockDevice(556, "Lounge Motion", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states))
+
+    def test_window_keyword_with_onstate_is_candidate(self):
+        """Device with onState + 'window' keyword IS a contact candidate."""
+        dev    = MockDevice(557, "Kitchen Window Sensor", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states))
+
+    def test_door_and_motion_name_is_not_contact(self):
+        """Device named 'Front Door Motion' has 'door' AND 'motion' - NOT a contact candidate.
+
+        Motion keywords beat contact keywords in name-only matching.
+        'Front Door Motion' should fall through to _disc_is_motion() and be
+        logged as ON/OFF, not OPEN/CLOSED.
+        """
+        dev    = MockDevice(558, "Front Door Motion", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states))
+
+    def test_garage_door_motion_name_is_not_contact(self):
+        """Device named 'Garage Door Motion' has both keywords - NOT a contact candidate."""
+        dev    = MockDevice(559, "Garage Door Motion", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states))
+
+    def test_door_sensor_no_motion_keyword_remains_contact(self):
+        """Device named 'Front Door Sensor' has 'door' but no motion keyword - still contact."""
+        dev    = MockDevice(560, "Front Door Sensor", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states))
+
+
+# ======================================
+# TEST: DISCOVERY FILTER (_disc_is_motion / _disc_motion_states)
+# ======================================
+
+class TestDiscoveryMotion(unittest.TestCase):
+    """Verify _disc_is_motion() correctly identifies motion/occupancy sensors
+    and _disc_motion_states() returns the right state names."""
+
+    def setUp(self):
+        mock_indigo.devices   = make_device_registry()
+        mock_indigo.variables = make_variable_registry()
+        self.plugin = make_plugin()
+
+    def test_device_with_occupancy_state_is_motion_candidate(self):
+        """Device with 'occupancy' state IS a motion candidate."""
+        dev    = MockDevice(100, "Some Sensor", on_state=False)
+        states = {"occupancy": True, "battery": 90}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states))
+
+    def test_device_with_pirDetection_state_is_motion_candidate(self):
+        """Device with 'pirDetection' state IS a motion candidate."""
+        dev    = MockDevice(101, "Basin mmWave Sensor", on_state=False)
+        states = {"pirDetection": False, "presence": True}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states))
+
+    def test_device_with_presence_state_is_motion_candidate(self):
+        """Device with 'presence' state IS a motion candidate."""
+        dev    = MockDevice(102, "Kitchen FP2", on_state=False)
+        states = {"presence": True}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states))
+
+    def test_device_with_motion_keyword_and_onstate_is_candidate(self):
+        """Device with onState + 'motion' keyword IS a motion candidate."""
+        dev    = MockDevice(103, "Lounge Motion Sensor", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states))
+
+    def test_device_with_mmwave_keyword_and_onstate_is_candidate(self):
+        """Device with onState + 'mmwave' keyword IS a motion candidate."""
+        dev    = MockDevice(104, "Kitchen mmWave FP2", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states))
+
+    def test_thermostat_with_motion_keyword_is_not_motion_candidate(self):
+        """ThermostatDevice (no onState) with 'motion' keyword is NOT a candidate."""
+        dev    = MockThermostatDevice(105, "Zone Motion Valve")
+        states = {}
+        self.assertFalse(self.plugin._disc_is_motion(dev, states))
+
+    def test_light_switch_is_not_motion_candidate(self):
+        """Device with onState but no motion keywords/states is NOT a motion candidate."""
+        dev    = MockDevice(106, "Kitchen Light Switch", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_motion(dev, states))
+
+    def test_contact_sensor_not_also_motion_candidate(self):
+        """A contact sensor (contact state) is NOT additionally a motion candidate.
+        In practice callers use elif, but the method itself should return False here."""
+        dev    = MockDevice(107, "Front Door Sensor", on_state=False)
+        states = {"contact": True}
+        # contact state is not in _MOTION_STATE_NAMES, 'door' not in _MOTION_NAME_KEYWORDS
+        self.assertFalse(self.plugin._disc_is_motion(dev, states))
+
+    def test_disc_motion_states_returns_found_motion_states(self):
+        """_disc_motion_states returns all matching motion state names, sorted."""
+        states = {"pirDetection": False, "presence": True, "battery": 80}
+        result = self.plugin._disc_motion_states(states)
+        self.assertIn("pirDetection", result)
+        self.assertIn("presence",     result)
+        self.assertNotIn("battery",   result)
+
+    def test_disc_motion_states_fallback_to_onstate(self):
+        """_disc_motion_states returns ['onState'] when no known motion states found."""
+        states = {"onState": False}
+        result = self.plugin._disc_motion_states(states)
+        self.assertEqual(result, ["onState"])
+
+    def test_disc_motion_states_empty_states_fallback(self):
+        """_disc_motion_states returns ['onState'] for empty states dict."""
+        result = self.plugin._disc_motion_states({})
+        self.assertEqual(result, ["onState"])
+
+    def test_front_door_motion_is_motion_candidate(self):
+        """Device named 'Front Door Motion' IS a motion candidate.
+
+        Because _disc_is_contact now returns False when both a contact keyword
+        ('door') and a motion keyword ('motion') appear in the name, the device
+        falls through to _disc_is_motion() which returns True.  This ensures
+        the device is logged as ON/OFF, not OPEN/CLOSED.
+        """
+        dev    = MockDevice(558, "Front Door Motion", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states))
+
+
+# ======================================
+# TEST: NAME EXCLUSION KEYWORDS
+# ======================================
+
+class TestNameExclusionFilter(unittest.TestCase):
+    """Verify _NAME_EXCLUSION_KEYWORDS veto name-based classification.
+
+    Devices with sensor keywords in their name (door, garage, motion, etc.)
+    must NOT be classified as contact or motion sensors if their name also
+    contains an exclusion keyword (temperature, luminance, power, etc.).
+
+    State-name matching (contact, doorSensor, occupancy, etc.) is never
+    affected by exclusion keywords.
+    """
+
+    def setUp(self):
+        mock_indigo.devices   = make_device_registry()
+        mock_indigo.variables = make_variable_registry()
+        self.plugin = make_plugin()
+
+    # --- contact exclusions ---
+
+    def test_luminance_device_with_door_keyword_not_contact(self):
+        """'Front Door Luminance' has 'door' but 'luminance' vetoes it - NOT contact."""
+        dev    = MockDevice(700, "Front Door Luminance", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'luminance' in name must veto contact classification")
+
+    def test_temperature_device_with_door_keyword_not_contact(self):
+        """'Front Door Temperature' has 'door' but 'temperature' vetoes it - NOT contact."""
+        dev    = MockDevice(701, "Front Door Temperature", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'temperature' in name must veto contact classification")
+
+    def test_power_device_with_garage_keyword_not_contact(self):
+        """'HA Garage Freezer Power' has 'garage' but 'power' vetoes it - NOT contact."""
+        dev    = MockDevice(702, "HA Garage Freezer Power", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'power' in name must veto contact classification")
+
+    def test_repeater_with_garage_keyword_not_contact(self):
+        """'Garage Loft Repeater Smart Plug' - 'repeater' vetoes it - NOT contact."""
+        dev    = MockDevice(703, "Garage Loft Repeater Smart Plug", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'repeater' in name must veto contact classification")
+
+    def test_control_device_with_door_keyword_not_contact(self):
+        """'HA Garage Door Control' has 'door'+'garage' but 'control' vetoes - NOT contact."""
+        dev    = MockDevice(704, "HA Garage Door Control", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'control' in name must veto contact classification")
+
+    def test_virtual_device_with_door_keyword_not_contact(self):
+        """'Garage Door Virtual' has 'door'+'garage' but 'virtual' vetoes - NOT contact."""
+        dev    = MockDevice(705, "Garage Door Virtual", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'virtual' in name must veto contact classification")
+
+    def test_voltage_device_with_garage_keyword_not_contact(self):
+        """'HA Garage Freezer Voltage' has 'garage' but 'voltage' vetoes - NOT contact."""
+        dev    = MockDevice(706, "HA Garage Freezer Voltage", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'voltage' in name must veto contact classification")
+
+    def test_current_device_with_garage_keyword_not_contact(self):
+        """'HA Garage Freezer Current' has 'garage' but 'current' vetoes - NOT contact."""
+        dev    = MockDevice(707, "HA Garage Freezer Current", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'current' in name must veto contact classification")
+
+    def test_lights_device_with_garage_keyword_not_contact(self):
+        """'HA Garage Strip Lights' has 'garage' but 'lights' vetoes it - NOT contact."""
+        dev    = MockDevice(708, "HA Garage Strip Lights", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'lights' in name must veto contact classification")
+
+    def test_light_device_with_door_keyword_not_contact(self):
+        """'Back Door Light' has 'door' but 'light' vetoes it - NOT contact."""
+        dev    = MockDevice(709, "Back Door Light", on_state=False)
+        states = {}
+        self.assertFalse(self.plugin._disc_is_contact(dev, states),
+            msg="'light' in name must veto contact classification")
+
+    # --- state-name matching beats exclusion keywords ---
+
+    def test_contact_state_beats_luminance_exclusion(self):
+        """Device with 'contact' state IS a contact sensor even if name has 'luminance'."""
+        dev    = MockDevice(710, "Front Door Luminance Contact", on_state=False)
+        states = {"contact": True}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states),
+            msg="State-name match ('contact') must win over exclusion keyword")
+
+    def test_doorSensor_state_beats_temperature_exclusion(self):
+        """Device with 'doorSensor' state IS a contact sensor even if name has 'temp'."""
+        dev    = MockDevice(711, "Entry Temp Sensor", on_state=False)
+        states = {"doorSensor": False}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states),
+            msg="State-name match ('doorSensor') must win over exclusion keyword")
+
+    def test_occupancy_state_beats_power_exclusion(self):
+        """Device with 'occupancy' state IS a motion sensor even if name has 'power'."""
+        dev    = MockDevice(712, "Power Presence Sensor", on_state=False)
+        states = {"occupancy": False}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states),
+            msg="State-name match ('occupancy') must win over exclusion keyword")
+
+    # --- real sensors still detected (no false negatives) ---
+
+    def test_front_door_sensor_still_contact(self):
+        """'Front Door Sensor' has no exclusion keywords - still a contact candidate."""
+        dev    = MockDevice(720, "Front Door Sensor", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_contact(dev, states),
+            msg="Valid contact sensor must not be blocked by exclusion filter")
+
+    def test_lounge_motion_sensor_still_motion(self):
+        """'Lounge Motion Sensor' has no exclusion keywords - still a motion candidate."""
+        dev    = MockDevice(721, "Lounge Motion Sensor", on_state=False)
+        states = {}
+        self.assertTrue(self.plugin._disc_is_motion(dev, states),
+            msg="Valid motion sensor must not be blocked by exclusion filter")
+
+
+# ======================================
 # TEST: MENU CALLBACKS
 # ======================================
 
 def make_contact_device_registry():
-    """Return a MockDevices registry that includes a contact sensor candidate."""
+    """Return a MockDevices registry with contact/motion candidates and known
+    false-positives.
+
+    Includes:
+      555001 - Front Door Sensor      : onState + 'door' keyword  -> CONTACT candidate
+      555002 - Lounge Motion Sensor   : onState + 'motion' keyword -> MOTION candidate
+      555003 - Living Room Door TRV   : MockThermostatDevice (no onState) + 'door'
+                                        -> NOT a candidate (no onState)
+      555004 - Kitchen Light Switch   : onState but no contact/motion keywords
+                                        -> NOT a candidate (no keywords)
+      555005 - Virtual Door Switch    : onState + 'door' keyword BUT virtual pluginId
+                                        -> NOT a candidate (excluded plugin)
+      555006 - HA Garage Door Gen1    : onState + 'garage' keyword BUT Alexa pluginId
+                                        -> NOT a candidate (excluded plugin)
+      555007 - Front Door Luminance   : onState + 'door' keyword BUT 'luminance' exclusion
+                                        -> NOT a candidate (name exclusion keyword)
+      555008 - Front Door Temperature : onState + 'door' keyword BUT 'temperature' exclusion
+                                        -> NOT a candidate (name exclusion keyword)
+      555009 - HA Garage Freezer Power: onState + 'garage' keyword BUT 'power' exclusion
+                                        -> NOT a candidate (name exclusion keyword)
+      555010 - Garage Loft Repeater   : onState + 'garage' keyword BUT 'repeater' exclusion
+                                        -> NOT a candidate (name exclusion keyword)
+      555011 - HA Garage Door Control : onState + 'door'/'garage' BUT 'control' exclusion
+                                        -> NOT a candidate (name exclusion keyword)
+      555012 - Garage Door Virtual    : onState + 'door'/'garage' BUT 'virtual' exclusion
+                                        -> NOT a candidate (name exclusion keyword)
+      555013 - HA Garage Strip Lights : onState + 'garage' keyword BUT 'lights' exclusion
+                                        -> NOT a candidate (name exclusion keyword)
+    """
     registry = make_device_registry()
-    # Add a device whose name contains 'door' so _disc_is_contact() recognises it
     registry[555001] = MockDevice(555001, "Front Door Sensor",
                                   on_state=False, states={"onState": False})
-    registry[555002] = MockDevice(555002, "Lounge Motion",
+    registry[555002] = MockDevice(555002, "Lounge Motion Sensor",
+                                  on_state=False, states={"onState": False})
+    registry[555003] = MockThermostatDevice(555003, "Living Room Door TRV",
+                                            states={"setpointHeat": 18})
+    registry[555004] = MockDevice(555004, "Kitchen Light Switch",
+                                  on_state=False, states={"onState": False})
+    registry[555005] = MockDevice(555005, "Virtual Door Switch",
+                                  on_state=False, states={"onState": False},
+                                  plugin_id="com.perceptiveautomation.indigoplugin.virtualdevices")
+    registry[555006] = MockDevice(555006, "HA Garage Door Gen1",
+                                  on_state=False, states={"onState": False},
+                                  plugin_id="com.indigodomo.indigoplugin.alexa")
+    registry[555007] = MockDevice(555007, "Front Door Luminance",
+                                  on_state=False, states={"onState": False})
+    registry[555008] = MockDevice(555008, "Front Door Temperature",
+                                  on_state=False, states={"onState": False})
+    registry[555009] = MockDevice(555009, "HA Garage Freezer Power",
+                                  on_state=False, states={"onState": False})
+    registry[555010] = MockDevice(555010, "Garage Loft Repeater Smart Plug",
+                                  on_state=False, states={"onState": False})
+    registry[555011] = MockDevice(555011, "HA Garage Door Control",
+                                  on_state=False, states={"onState": False})
+    registry[555012] = MockDevice(555012, "Garage Door Virtual",
+                                  on_state=False, states={"onState": False})
+    registry[555013] = MockDevice(555013, "HA Garage Strip Lights",
                                   on_state=False, states={"onState": False})
     return registry
 
@@ -1001,14 +1435,32 @@ class TestMenuCallbacks(unittest.TestCase):
         self.assertIn("Front Door Sensor", info_text,
             msg="Device with 'door' in name should be logged as a candidate")
 
-    def test_menu_find_contact_sensors_skips_non_contact(self):
-        """menuFindContactSensors does not log non-contact devices as candidates."""
+    def test_menu_find_contact_sensors_finds_motion_sensor(self):
+        """menuFindContactSensors now also logs motion sensor candidates."""
         plugin = make_plugin()
         plugin.menuFindContactSensors()
 
         info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
-        self.assertNotIn("Lounge Motion", info_text,
-            msg="Non-contact device 'Lounge Motion' should not appear in results")
+        self.assertIn("Lounge Motion Sensor", info_text,
+            msg="Motion sensor 'Lounge Motion Sensor' should appear as a motion candidate")
+
+    def test_menu_find_contact_sensors_skips_non_sensor(self):
+        """menuFindContactSensors excludes devices that are neither contact nor motion."""
+        plugin = make_plugin()
+        plugin.menuFindContactSensors()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertNotIn("Kitchen Light Switch", info_text,
+            msg="'Kitchen Light Switch' has no sensor keywords - should not appear")
+
+    def test_menu_find_contact_sensors_skips_thermostat_with_door_keyword(self):
+        """menuFindContactSensors excludes ThermostatDevice even if name has 'door'."""
+        plugin = make_plugin()
+        plugin.menuFindContactSensors()
+
+        info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
+        self.assertNotIn("Living Room Door TRV", info_text,
+            msg="ThermostatDevice 'Living Room Door TRV' must not appear - no onState")
 
     # --- menuDiscoverDevices ---
 
@@ -1072,6 +1524,225 @@ class TestMenuCallbacks(unittest.TestCase):
             self.assertTrue(len(active_lines) > 0,
                 msg=f"Contact candidate 555001 should appear as an active (uncommented) entry.\n"
                     f"Config content:\n{content}")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_menu_discover_devices_excluded_id_stays_commented_out(self):
+        """Device IDs listed in config's excluded_ids are written as commented-out entries.
+
+        When the user adds a device ID to "excluded_ids" in sensor_monitor_config.json
+        and re-runs discovery, that device must NOT appear as an active entry —
+        even if it would normally be classified as a contact or motion sensor.
+        """
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "sensor_monitor_config.json")
+
+        # Pre-populate config with excluded_ids containing device 555001 (Front Door Sensor)
+        existing_config = ('{\n'
+                           '  "excluded_ids": [555001],\n'
+                           '  "devices": [],\n'
+                           '  "variables": []\n'
+                           '}\n')
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(existing_config)
+
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+
+        try:
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+
+            # 555001 must not appear as an active (uncommented) device entry line
+            # Use '"id": 555001' to avoid matching the "excluded_ids" metadata line
+            active_lines = [
+                l for l in content.splitlines()
+                if '"id": 555001' in l and not l.lstrip().startswith("#")
+            ]
+            # 555001 must appear as a commented-out device entry
+            commented_lines = [
+                l for l in content.splitlines()
+                if '"id": 555001' in l and l.lstrip().startswith("#")
+            ]
+
+            self.assertEqual(len(active_lines), 0,
+                msg=f"Excluded device 555001 must NOT appear as active entry.\n"
+                    f"Config content:\n{content}")
+            self.assertGreater(len(commented_lines), 0,
+                msg=f"Excluded device 555001 must appear as a commented-out entry.\n"
+                    f"Config content:\n{content}")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_menu_discover_devices_excluded_ids_preserved_in_output(self):
+        """The excluded_ids list is written into the regenerated config file.
+
+        After re-discovery, the new config must still contain the excluded_ids
+        field with the original device ID so that subsequent discovery runs
+        continue to respect the exclusion without further user action.
+        """
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "sensor_monitor_config.json")
+
+        existing_config = ('{\n'
+                           '  "excluded_ids": [555001],\n'
+                           '  "devices": [],\n'
+                           '  "variables": []\n'
+                           '}\n')
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(existing_config)
+
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+
+        try:
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertIn('"excluded_ids"', content,
+                msg="Regenerated config must contain the 'excluded_ids' field")
+            # The ID 555001 must appear in the excluded_ids value (as an integer)
+            # Find the excluded_ids line and confirm 555001 is in it
+            excl_lines = [l for l in content.splitlines() if '"excluded_ids"' in l]
+            self.assertTrue(any("555001" in l for l in excl_lines),
+                msg=f"555001 must be present in excluded_ids in the regenerated config.\n"
+                    f"excluded_ids lines: {excl_lines}\n"
+                    f"Config content:\n{content}")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_menu_discover_devices_skips_virtual_plugin_devices(self):
+        """Devices from excluded plugin IDs are completely absent from discovery output.
+
+        Device 555005 'Virtual Door Switch' has onState, 'door' in its name, and
+        would normally be classified as a contact sensor — but its pluginId marks
+        it as a Virtual Device.  It must not appear anywhere in the config file,
+        not even as a commented-out entry.
+        """
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "sensor_monitor_config.json")
+
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+
+        try:
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertNotIn('"id": 555005', content,
+                msg=f"Virtual device 555005 must not appear in config at all.\n"
+                    f"Config content:\n{content}")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_menu_discover_devices_skips_alexa_plugin_devices(self):
+        """Devices from the Alexa plugin are completely absent from discovery output.
+
+        Device 555006 'HA Garage Door Gen1' has onState, 'garage' in its name,
+        and would normally be classified as a contact sensor — but its pluginId
+        marks it as an Alexa mirror device.  It must not appear anywhere in the
+        config file, not even as a commented-out entry.
+
+        The Alexa plugin creates a named mirror for every exposed Indigo device,
+        so real switches exposed to Alexa appear as sensor candidates unless
+        the plugin ID is excluded.
+        """
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "sensor_monitor_config.json")
+
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+
+        try:
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertNotIn('"id": 555006', content,
+                msg=f"Alexa device 555006 must not appear in config at all.\n"
+                    f"Config content:\n{content}")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_menu_discover_devices_skips_name_excluded_devices(self):
+        """Devices with name exclusion keywords do not appear in config at all.
+
+        Devices 555007-555013 all have contact keywords (door/garage) in their
+        names AND onState, but also have exclusion keywords that veto name-based
+        classification:
+          555007 - Front Door Luminance    (luminance)
+          555008 - Front Door Temperature  (temperature)
+          555009 - HA Garage Freezer Power (power)
+          555010 - Garage Loft Repeater    (repeater + plug)
+          555011 - HA Garage Door Control  (control)
+          555012 - Garage Door Virtual     (virtual)
+          555013 - HA Garage Strip Lights  (lights)
+
+        None must appear anywhere in the generated config file.
+        """
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "sensor_monitor_config.json")
+
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+
+        try:
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+
+            excluded = {
+                555007: "Front Door Luminance",
+                555008: "Front Door Temperature",
+                555009: "HA Garage Freezer Power",
+                555010: "Garage Loft Repeater Smart Plug",
+                555011: "HA Garage Door Control",
+                555012: "Garage Door Virtual",
+                555013: "HA Garage Strip Lights",
+            }
+            for dev_id, dev_name in excluded.items():
+                self.assertNotIn(f'"id": {dev_id}', content,
+                    msg=f"Name-excluded device {dev_id} '{dev_name}' must not "
+                        f"appear in config at all.\nConfig content:\n{content}")
         finally:
             _mod.DISCOVERY_OUTPUT_PATH = orig_disc
             _mod.CONFIG_PATH           = orig_config
