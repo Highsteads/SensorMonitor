@@ -47,6 +47,20 @@ below for how to set up your own devices.
 
 ---
 
+## Credentials
+
+This plugin requires no external credentials — it reads Indigo device states locally
+with no API keys, cloud accounts, or passwords needed.
+
+All configuration is done via the JSON config file at:
+
+    ~/Documents/Indigo/SensorMonitor/sensor_monitor_config.json
+
+A `secrets_example.py` file is included as standard on all CliveS plugins. It is not
+used by this plugin.
+
+---
+
 ## Installation
 
 1. Double-click `Sensor_Monitor.indigoPlugin` — Indigo will prompt to install it
