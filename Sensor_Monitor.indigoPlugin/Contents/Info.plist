@@ -10,6 +10,8 @@
     <string>1.5.9</string>
     <key>CFBundleShortVersionString</key>
     <string>1.5.9</string>
+    <key>PluginVersion</key>
+    <string>1.5.9</string>
     <key>ServerApiVersion</key>
     <string>3.0</string>
 </dict>
