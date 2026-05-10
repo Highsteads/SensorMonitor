@@ -16,3 +16,6 @@ __pycache__/
 # Distribution
 SensorMonitor.indigoPlugin.zip
 *.zip
+
+# Claude Code context file — local only
+CLAUDE.md

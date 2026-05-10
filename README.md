@@ -56,7 +56,7 @@ All configuration is done via the JSON config file at:
 
     ~/Documents/Indigo/SensorMonitor/sensor_monitor_config.json
 
-A `secrets_example.py` file is included as standard on all CliveS plugins. It is not
+A `IndigoSecrets_example.py` file is included as standard on all CliveS plugins. It is not
 used by this plugin.
 
 ---
