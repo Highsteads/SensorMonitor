@@ -17,4 +17,11 @@
         <CallbackMethod>menuReloadConfig</CallbackMethod>
     </MenuItem>
 
+    <MenuItem id="sep2"/>
+
+    <MenuItem id="showPluginInfo">
+        <Name>Show Plugin Info</Name>
+        <CallbackMethod>showPluginInfo</CallbackMethod>
+    </MenuItem>
+
 </MenuItems>

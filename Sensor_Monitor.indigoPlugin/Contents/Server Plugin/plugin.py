@@ -13,8 +13,16 @@ except ImportError:
 
 import json
 import os
+import platform
 import re
+import sys as _sys
 from datetime import datetime
+
+_sys.path.insert(0, os.getcwd())
+try:
+    from plugin_utils import log_startup_banner
+except ImportError:
+    log_startup_banner = None
 
 # ======================================
 # CONFIG FILE PATH
@@ -201,6 +209,11 @@ class Plugin(indigo.PluginBase):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self.debug = pluginPrefs.get("showDebugInfo", False)
         self._load_config()
+
+        if log_startup_banner:
+            log_startup_banner(pluginId, pluginDisplayName, pluginVersion)
+        else:
+            indigo.server.log(f"{pluginDisplayName} v{pluginVersion} starting")
 
     def startup(self):
         indigo.devices.subscribeToChanges()
@@ -912,3 +925,13 @@ class Plugin(indigo.PluginBase):
             )
         else:
             self.logger.info("[Sensor Monitor] All monitored variables validated OK")
+
+    # ======================================
+    # Menu handlers
+    # ======================================
+
+    def showPluginInfo(self, valuesDict=None, typeId=None):
+        if log_startup_banner:
+            log_startup_banner(self.pluginId, self.pluginDisplayName, self.pluginVersion)
+        else:
+            indigo.server.log(f"{self.pluginDisplayName} v{self.pluginVersion}")
