@@ -4,7 +4,15 @@
 # Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        11-05-2026
-# Version:     1.7.0
+# Version:     1.7.1
+#
+# v1.7.1 (11-05-2026):
+# - Moved sensor_monitor_config.json and device_discovery.json out of
+#   Logs/SensorMonitor/ (wrong place — Logs is for logs) into the
+#   Indigo-standard plugin Preferences folder:
+#     <install>/Preferences/Plugins/com.clives.indigoplugin.sensormonitor/
+#   One-time auto-migration moves existing files from the old location
+#   on first startup, preserving all customisations.
 #
 # v1.7.0 (11-05-2026):
 # - Added group-change custom triggers. Sensor Monitor now fires an
@@ -55,38 +63,49 @@ except ImportError:
 # ======================================
 # CONFIG FILE PATH
 #
+# Lives under the Indigo-standard plugin Preferences folder:
+#   <install>/Preferences/Plugins/com.clives.indigoplugin.sensormonitor/
+# v1.7.0 and earlier wrote into Logs/SensorMonitor/ — that was wrong (Logs
+# is for log files, not user state). v1.7.1 migrates the files on first
+# startup; see _migrate_config_to_prefs(). The legacy path constants are
+# retained for the migration check.
+#
 # indigo.server.getInstallFolderPath() returns the Indigo base directory,
-# e.g. "/Library/Application Support/Perceptive Automation/Indigo 2025.1".
-# Using the API (rather than a hardcoded string) means the paths update
-# automatically when Indigo upgrades from 2025.1 to 2026.1 - no code changes
-# needed.
+# e.g. "/Library/Application Support/Perceptive Automation/Indigo 2025.2".
+# Using the API rather than a hardcoded string means the paths follow the
+# Indigo version automatically — no code changes needed on upgrade.
 #
-# NOTE: Indigo's plugin runtime does NOT set __file__, so file-relative paths
-# cannot be used at module level.  The API call is the correct approach.
+# NOTE: Indigo's plugin runtime does NOT set __file__, so file-relative
+# paths cannot be used at module level. The API call is the correct approach.
 #
-# The except block is the fallback for the test environment where indigo is a
-# MagicMock and os.path.join(MagicMock(), ...) raises TypeError.  Tests then
+# The except block is the fallback for the test environment where indigo is
+# a MagicMock and os.path.join(MagicMock(), ...) raises TypeError. Tests
 # override CONFIG_PATH / DISCOVERY_OUTPUT_PATH with safe temp paths anyway.
 #
-# If this config file exists the plugin loads its device and variable lists
-# from it, instead of from the hardcoded DEVICE_MONITOR / VARIABLE_MONITOR
-# dicts below.  The file supports # comment lines to disable individual
-# entries.  Run discover_devices.py in the Indigo Script Editor to generate
-# an initial config file, then edit as needed.
+# If this config file exists the plugin loads its device, variable, and
+# group lists from it instead of from the hardcoded fallback dicts below.
+# The file supports # comment lines to disable individual entries.
 #
-# Reload the plugin after saving changes:
-#   Plugins > Sensor Monitor > Reload Plugin
+# Reload after saving changes:
+#   Plugins > Sensor Monitor > Reload Config File
 # ======================================
+
+_PLUGIN_BUNDLE_ID = "com.clives.indigoplugin.sensormonitor"
 
 try:
     _INDIGO_BASE = indigo.server.getInstallFolderPath()
-    _LOG_DIR     = os.path.join(_INDIGO_BASE, "Logs", "SensorMonitor")
+    _PREFS_DIR   = os.path.join(_INDIGO_BASE, "Preferences", "Plugins", _PLUGIN_BUNDLE_ID)
+    _LEGACY_DIR  = os.path.join(_INDIGO_BASE, "Logs", "SensorMonitor")
 except Exception:
     # Fallback used in test environment (indigo is a MagicMock)
-    _LOG_DIR = "/Library/Application Support/Perceptive Automation/Indigo 2025.1/Logs/SensorMonitor"
+    _BASE = "/Library/Application Support/Perceptive Automation/Indigo 2025.2"
+    _PREFS_DIR  = os.path.join(_BASE, "Preferences", "Plugins", _PLUGIN_BUNDLE_ID)
+    _LEGACY_DIR = os.path.join(_BASE, "Logs", "SensorMonitor")
 
-CONFIG_PATH           = os.path.join(_LOG_DIR, "sensor_monitor_config.json")
-DISCOVERY_OUTPUT_PATH = os.path.join(_LOG_DIR, "device_discovery.json")
+CONFIG_PATH                  = os.path.join(_PREFS_DIR,  "sensor_monitor_config.json")
+DISCOVERY_OUTPUT_PATH        = os.path.join(_PREFS_DIR,  "device_discovery.json")
+LEGACY_CONFIG_PATH           = os.path.join(_LEGACY_DIR, "sensor_monitor_config.json")
+LEGACY_DISCOVERY_OUTPUT_PATH = os.path.join(_LEGACY_DIR, "device_discovery.json")
 
 # ======================================
 # DISCOVERY CONSTANTS
@@ -256,6 +275,11 @@ class Plugin(indigo.PluginBase):
         self.groups          = {}    # {group_name: set(device_ids)}
         self.group_members   = set() # union of all group device_ids
         self.event_triggers  = {}    # {trigger.id: indigo.trigger}
+        # Migration must run before _load_config so the loader sees the file
+        # at its new location. self.logger isn't fully ready inside __init__,
+        # so migration logs are best-effort here — _load_config will log a
+        # second time at INFO once the logger is ready.
+        self._migrate_config_to_prefs()
         self._load_config()
 
         if log_startup_banner:
@@ -1007,6 +1031,62 @@ class Plugin(indigo.PluginBase):
     # ======================================
     # PRIVATE HELPERS
     # ======================================
+
+    def _migrate_config_to_prefs(self):
+        """One-time migration from the v1.7.0 location (Logs/SensorMonitor/)
+        to the proper Indigo Preferences/Plugins/<bundle>/ folder.
+
+        Runs every startup but is a no-op once the new files exist. Uses
+        os.rename so the file's mtime is preserved.
+        """
+        try:
+            os.makedirs(_PREFS_DIR, exist_ok=True)
+        except Exception as exc:
+            # logger may not be ready inside __init__ — best-effort
+            try:
+                self.logger.warning(
+                    f"[Sensor Monitor] Could not create prefs dir "
+                    f"{_PREFS_DIR}: {exc}"
+                )
+            except Exception:
+                pass
+            return
+
+        moves = [
+            (LEGACY_CONFIG_PATH,           CONFIG_PATH,           "sensor_monitor_config.json"),
+            (LEGACY_DISCOVERY_OUTPUT_PATH, DISCOVERY_OUTPUT_PATH, "device_discovery.json"),
+        ]
+        moved_any = False
+        for src, dst, label in moves:
+            if not os.path.exists(src):
+                continue
+            if os.path.exists(dst):
+                # Don't clobber a newer file at the new location
+                continue
+            try:
+                os.rename(src, dst)
+                moved_any = True
+                try:
+                    self.logger.info(
+                        f"[Sensor Monitor] Migrated {label}: "
+                        f"{src} -> {dst}"
+                    )
+                except Exception:
+                    pass
+            except Exception as exc:
+                try:
+                    self.logger.warning(
+                        f"[Sensor Monitor] Could not migrate {label}: {exc}"
+                    )
+                except Exception:
+                    pass
+
+        # Clean up the now-empty legacy directory (silent if not empty or missing)
+        if moved_any:
+            try:
+                os.rmdir(_LEGACY_DIR)
+            except OSError:
+                pass  # not empty, or already gone — fine
 
     def _load_config(self, config_path=None):
         """Load device and variable monitor lists from the JSON config file.
