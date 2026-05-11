@@ -3,8 +3,24 @@
 # Filename:    plugin.py
 # Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
-# Date:        27-02-2026
-# Version:     1.5.9
+# Date:        11-05-2026
+# Version:     1.6.0
+#
+# v1.6.0 (11-05-2026):
+# - Discovery now uses Zigbee2MQTT-Bridge ownerProps (has_contact /
+#   has_occupancy / has_presence / has_pir) as authoritative classification
+#   when available. The generic z2mSensor device type emits a default
+#   "contact": false field even on motion-only sensors, which made the
+#   v1.5.9 state-key heuristic falsely classify motion-named z2mSensor
+#   devices as contact sensors (e.g. "Living Room Door Motion Sensor",
+#   "Moes Presence Sensor", "Right Presence Sensor").
+# - deviceTypeId hints honoured: z2mContactSensor -> contact;
+#   z2mOccupancySensor -> motion.
+# - Motion-keyword in device name now vetoes contact classification even
+#   when a stray "contact" state key is present.
+# - _disc_motion_states picks a single preferred state per device (priority
+#   occupancy > presence > motion > pirDetection > motionDetected) so
+#   multi-state Z2M presence sensors emit one log line per change, not 3-4.
 
 try:
     import indigo
@@ -71,6 +87,19 @@ _CONTACT_NAME_KEYWORDS = ["contact", "door", "window", "entry", "gate", "patio",
 
 _MOTION_STATE_NAMES    = {"occupancy", "pirDetection", "presence", "motion", "motionDetected"}
 _MOTION_NAME_KEYWORDS  = ["motion", "pir", "presence", "occupancy", "mmwave", "radar"]
+
+# Preferred motion-state order — pick the single best one when multiple exist.
+# Multi-state Z2M presence sensors typically report ALL of: motion, occupancy,
+# presence, pirDetection. Without this, a single PIR trip emits 3-4 identical
+# log lines because we configure a monitor entry per matching state.
+_MOTION_STATE_PRIORITY = ("occupancy", "presence", "motion",
+                         "pirDetection", "motionDetected")
+
+# Zigbee2MQTT-Bridge plugin ID — owner-props on these devices include
+# authoritative has_contact / has_occupancy / has_presence / has_pir flags.
+_Z2M_BRIDGE_PLUGIN_ID  = "com.clives.indigoplugin.z2mbridge"
+_Z2M_CONTACT_TYPE_IDS   = {"z2mContactSensor"}
+_Z2M_OCCUPANCY_TYPE_IDS = {"z2mOccupancySensor"}
 
 # ======================================
 # NAME EXCLUSION KEYWORDS
@@ -683,76 +712,122 @@ class Plugin(indigo.PluginBase):
         except Exception:
             return {}
 
+    def _disc_z2m_capabilities(self, dev):
+        """Return dict of Zigbee2MQTT-Bridge has_* capability flags for dev.
+
+        Returns {} when dev is not owned by the Z2M bridge plugin or the
+        ownerProps cannot be read. The bridge publishes authoritative flags
+        like has_contact, has_occupancy, has_presence, has_pir on every
+        device it manages — far more reliable than inspecting raw state keys,
+        because the generic z2mSensor device type emits stub fields for
+        every capability whether the physical device has them or not.
+        """
+        if getattr(dev, "pluginId", "") != _Z2M_BRIDGE_PLUGIN_ID:
+            return {}
+        try:
+            props = dict(dev.ownerProps or {})
+        except Exception:
+            return {}
+        return {k: v for k, v in props.items() if k.startswith("has_")}
+
     def _disc_is_contact(self, dev, states):
         """Return True if dev looks like a contact/door/window sensor.
 
-        A device is a contact candidate only if it can be monitored as a
-        binary sensor.  Specifically:
-          - Has a known contact state name (contact, doorSensor, windowSensor)
-            regardless of device type, OR
-          - Has an onState attribute AND its name contains a contact keyword
-            AND does NOT contain a motion keyword
-            AND does NOT contain a name exclusion keyword.
-
-        Devices without onState (e.g. ThermostatDevice, plain button Device)
-        are excluded from name-keyword matching.
+        Decision order (first match wins):
+          1. Z2M bridge has_contact flag — authoritative if device is Z2M-owned.
+          2. deviceTypeId hint — z2mContactSensor wins; z2mOccupancySensor
+             rules out contact.
+          3. Motion keyword in device name (motion/pir/presence/occupancy/
+             mmwave/radar) vetoes contact even if a stray "contact" state
+             field exists.
+          4. Known contact state name in dev.states (contact / doorSensor /
+             windowSensor).
+          5. Contact keyword in name AND no motion keyword AND no exclusion
+             keyword AND dev has onState.
 
         Name exclusion keywords (_NAME_EXCLUSION_KEYWORDS) prevent temperature
         sensors, power monitors, smart plugs, etc. from being picked up via
-        name matching.  Example: 'Front Door Temperature' has 'door' in its
-        name but 'temperature' disqualifies it.
-
-        State-name matching (contact / doorSensor / windowSensor) always wins
-        regardless of what else appears in the device name.
+        name matching.
         """
-        state_match = bool(_CONTACT_STATE_NAMES & set(states.keys()))
-        if state_match:
+        z2m_caps = self._disc_z2m_capabilities(dev)
+        # 1. Z2M bridge authoritative
+        if z2m_caps.get("has_contact") is True:
             return True
+        if z2m_caps.get("has_contact") is False:
+            return False
+        # Any explicit motion capability on Z2M means it's a motion device, not contact
+        if any(z2m_caps.get(k) is True for k in ("has_occupancy", "has_presence", "has_pir")):
+            return False
+
+        # 2. deviceTypeId hint
+        type_id = getattr(dev, "deviceTypeId", "")
+        if type_id in _Z2M_CONTACT_TYPE_IDS:
+            return True
+        if type_id in _Z2M_OCCUPANCY_TYPE_IDS:
+            return False
+
+        # 3. Motion keyword veto — beats state-key match
+        name_lower = dev.name.lower()
+        if any(kw in name_lower for kw in _MOTION_NAME_KEYWORDS):
+            return False
+
+        # 4. State-name match
+        if _CONTACT_STATE_NAMES & set(states.keys()):
+            return True
+
+        # 5. Name-keyword match
         if not hasattr(dev, "onState"):
             return False
-        name_lower = dev.name.lower()
         if any(kw in name_lower for kw in _NAME_EXCLUSION_KEYWORDS):
-            return False  # Non-sensor keyword in name - skip name-based matching
-        has_contact_kw = any(kw in name_lower for kw in _CONTACT_NAME_KEYWORDS)
-        has_motion_kw  = any(kw in name_lower for kw in _MOTION_NAME_KEYWORDS)
-        return has_contact_kw and not has_motion_kw
+            return False
+        return any(kw in name_lower for kw in _CONTACT_NAME_KEYWORDS)
 
     def _disc_is_motion(self, dev, states):
         """Return True if dev looks like a motion/occupancy/presence sensor.
 
-        A device is a motion candidate only if it can be monitored as a
-        binary sensor.  Specifically:
-          - Has a known motion state name (occupancy, pirDetection, presence,
-            motion, motionDetected) regardless of device type, OR
-          - Has an onState attribute AND its name contains a motion keyword
-            AND does NOT contain a name exclusion keyword.
+        Decision order (first match wins):
+          1. Z2M bridge has_occupancy / has_presence / has_pir — authoritative.
+          2. deviceTypeId hint — z2mOccupancySensor wins.
+          3. Known motion state name in dev.states.
+          4. Motion keyword in name AND no exclusion keyword AND dev has onState.
 
-        Devices without onState are excluded from name-keyword matching.
-        Name exclusion keywords (_NAME_EXCLUSION_KEYWORDS) prevent power
-        monitors, smart plugs, etc. from matching motion keywords.
-        State-name matching always wins over name exclusion keywords.
-        Contact sensors (already caught by _disc_is_contact) are excluded
-        by the caller using elif, so no need to re-check here.
+        Contact sensors (already caught by _disc_is_contact) are excluded by
+        the caller using elif.
         """
-        state_match = bool(_MOTION_STATE_NAMES & set(states.keys()))
-        if state_match:
+        z2m_caps = self._disc_z2m_capabilities(dev)
+        if any(z2m_caps.get(k) is True for k in ("has_occupancy", "has_presence", "has_pir")):
             return True
+        # If Z2M explicitly says none of those capabilities are present,
+        # fall through to other heuristics (some devices report presenceEvent
+        # without the has_presence flag — Aqara RTCZCGQ11LM is one example).
+
+        if getattr(dev, "deviceTypeId", "") in _Z2M_OCCUPANCY_TYPE_IDS:
+            return True
+
+        if _MOTION_STATE_NAMES & set(states.keys()):
+            return True
+
         if not hasattr(dev, "onState"):
             return False
         name_lower = dev.name.lower()
         if any(kw in name_lower for kw in _NAME_EXCLUSION_KEYWORDS):
-            return False  # Non-sensor keyword in name - skip name-based matching
+            return False
         return any(kw in name_lower for kw in _MOTION_NAME_KEYWORDS)
 
     def _disc_motion_states(self, states):
-        """Return sorted list of motion state names present in states dict.
+        """Return the single preferred motion state name as a one-element list.
 
-        Falls back to ["onState"] when no specific motion state names are
-        found (e.g. a sensor whose name matched a motion keyword but whose
-        states are not yet populated or use a generic binary state).
+        Multi-state Z2M presence sensors typically expose every variant
+        (motion, occupancy, presence, pirDetection) — emitting a config entry
+        per state means 3-4 identical log lines on each trip. Walk the
+        priority list (occupancy first, motion last) and pick the first
+        match; only fall back to ["onState"] if no motion-state name is
+        present at all.
         """
-        found = sorted(s for s in _MOTION_STATE_NAMES if s in states)
-        return found if found else ["onState"]
+        for preferred in _MOTION_STATE_PRIORITY:
+            if preferred in states:
+                return [preferred]
+        return ["onState"]
 
     def _format_entry_line(self, dev, state, on_text, off_text, commented=False):
         """Return a formatted JSON object string for sensor_monitor_config.json.
