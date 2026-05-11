@@ -4,7 +4,19 @@
 # Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        11-05-2026
-# Version:     1.6.0
+# Version:     1.7.0
+#
+# v1.7.0 (11-05-2026):
+# - Added group-change custom triggers. Sensor Monitor now fires an
+#   Indigo "Sensor Monitor: Group Changed" event whenever any device in
+#   a named group has a state change. Groups are defined as a new
+#   "groups" array in sensor_monitor_config.json — replaces Morris's
+#   Group Change Listener with a config-file-driven workflow so adding
+#   or removing devices is a text-file edit, not a fiddly multi-select.
+# - Triggers optionally save the firing device to a variable
+#   (name or ID), matching the Morris plugin's saveBool/saveVar feature.
+# - Discovery preserves the existing "groups" section across re-runs,
+#   same way it already preserves "excluded_ids".
 #
 # v1.6.0 (11-05-2026):
 # - Discovery now uses Zigbee2MQTT-Bridge ownerProps (has_contact /
@@ -237,6 +249,13 @@ class Plugin(indigo.PluginBase):
     def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self.debug = pluginPrefs.get("showDebugInfo", False)
+        # Group-change trigger machinery (v1.7.0). Populated by _load_config
+        # from the optional "groups" array in sensor_monitor_config.json.
+        # group_members is a flat set of device IDs across all groups for
+        # cheap O(1) membership testing inside deviceUpdated.
+        self.groups          = {}    # {group_name: set(device_ids)}
+        self.group_members   = set() # union of all group device_ids
+        self.event_triggers  = {}    # {trigger.id: indigo.trigger}
         self._load_config()
 
         if log_startup_banner:
@@ -264,6 +283,22 @@ class Plugin(indigo.PluginBase):
 
     def deviceUpdated(self, origDev, newDev):
         super().deviceUpdated(origDev, newDev)
+
+        # Loop-guard: ignore changes the plugin itself caused.
+        if newDev.pluginId == self.pluginId:
+            return
+
+        # --- Group-change triggers (v1.7.0) ---
+        # Independent of the per-state logging path below: a device may be in
+        # a group without being in device_monitor, and vice-versa. We fire
+        # group triggers on ANY state change (matches Morris's plugin
+        # behaviour: "fire when anything on these devices changes").
+        if newDev.id in self.group_members:
+            try:
+                if newDev.states != origDev.states:
+                    self._fire_group_triggers(newDev)
+            except Exception as exc:
+                self.logger.error(f"[Sensor Monitor] group-trigger error: {exc}")
 
         if newDev.id not in self.device_monitor:
             return
@@ -375,6 +410,74 @@ class Plugin(indigo.PluginBase):
         )
 
     # ======================================
+    # GROUP-CHANGE TRIGGER LIFECYCLE (v1.7.0)
+    # ======================================
+
+    def triggerStartProcessing(self, trigger):
+        """Indigo calls this when an enabled trigger of one of our event
+        types is loaded — we store the trigger so deviceUpdated() can fire it.
+        Confirmed pattern per global CLAUDE.md (ZwaveLockManager-style;
+        indigo.server.fireEvent() does NOT exist on PluginBase)."""
+        self.event_triggers[trigger.id] = trigger
+        group = trigger.pluginProps.get("groupName", "")
+        if group and group not in self.groups:
+            self.logger.warning(
+                f"[Sensor Monitor] Trigger '{trigger.name}' references "
+                f"unknown group '{group}' — edit sensor_monitor_config.json "
+                f"to add a group entry."
+            )
+
+    def triggerStopProcessing(self, trigger):
+        self.event_triggers.pop(trigger.id, None)
+
+    def getGroupNamesList(self, filter="", valuesDict=None, typeId="", targetId=0):
+        """ConfigUI callback — returns the list of group names from the
+        currently-loaded config file. Group definitions live in
+        sensor_monitor_config.json under a top-level 'groups' array."""
+        result = [(name, name) for name in sorted(self.groups.keys())]
+        return result if result else [("none", "-- No groups defined in config --")]
+
+    def _fire_group_triggers(self, dev):
+        """Fire any sensorGroupChange triggers whose group contains dev.id."""
+        for trigger in self.event_triggers.values():
+            if trigger.pluginTypeId != "sensorGroupChange":
+                continue
+            group = trigger.pluginProps.get("groupName", "")
+            members = self.groups.get(group, set())
+            if dev.id not in members:
+                continue
+
+            # Optional: save the firing device to a variable before firing,
+            # so the trigger's actions can read it via %%v:NN%% substitution.
+            if trigger.pluginProps.get("saveBool", False):
+                self._save_firing_device(trigger, dev)
+
+            indigo.trigger.execute(trigger)
+            ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            self.logger.debug(
+                f"[{ts}] [Sensor Monitor] Fired group trigger "
+                f"'{trigger.name}' (group '{group}') for {dev.name}"
+            )
+
+    def _save_firing_device(self, trigger, dev):
+        """Write the firing device's name or id to the configured variable."""
+        try:
+            var_id = int(trigger.pluginProps.get("saveVar", 0))
+        except (TypeError, ValueError):
+            return
+        if not var_id or var_id not in indigo.variables:
+            return
+        save_type = trigger.pluginProps.get("saveType", "name")
+        value = str(dev.id) if save_type == "id" else dev.name
+        try:
+            indigo.variable.updateValue(var_id, value)
+        except Exception as exc:
+            self.logger.error(
+                f"[Sensor Monitor] Could not save firing device to "
+                f"variable {var_id}: {exc}"
+            )
+
+    # ======================================
     # MENU ITEM CALLBACKS
     # Plugins > Sensor Monitor > ...
     # ======================================
@@ -398,8 +501,9 @@ class Plugin(indigo.PluginBase):
         ts = datetime.now().strftime('%H:%M:%S')
         self.logger.info(f"[{ts}] [Sensor Monitor] Device discovery starting...")
 
-        # --- Read excluded_ids from existing config (preserved across re-discovery) ---
-        excluded_ids = set()
+        # --- Read excluded_ids + groups from existing config (preserved across re-discovery) ---
+        excluded_ids     = set()
+        preserved_groups = []
         if os.path.exists(CONFIG_PATH):
             try:
                 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -408,13 +512,20 @@ class Plugin(indigo.PluginBase):
                 json_str     = re.sub(r",(\s*[}\]])", r"\1", "".join(active_lines))
                 existing_cfg = json.loads(json_str)
                 excluded_ids = set(int(x) for x in existing_cfg.get("excluded_ids", []))
+                preserved_groups = existing_cfg.get("groups", []) or []
                 if excluded_ids:
                     self.logger.info(
                         f"[{ts}] [Sensor Monitor] Preserving {len(excluded_ids)} "
                         f"excluded device(s) from existing config"
                     )
+                if preserved_groups:
+                    self.logger.info(
+                        f"[{ts}] [Sensor Monitor] Preserving "
+                        f"{len(preserved_groups)} group(s) from existing config"
+                    )
             except Exception:
-                excluded_ids = set()
+                excluded_ids     = set()
+                preserved_groups = []
 
         all_devices     = []
         contact_sensors = []
@@ -561,6 +672,37 @@ class Plugin(indigo.PluginBase):
                 '    # Add variables: {"id": 123456789, "name": "Var_Name", "label": "Display Label"}'
             )
             lines.append("")
+            lines.append('  ],')
+            lines.append("")
+            # --- groups: fire a custom "Sensor Monitor: Group Changed" trigger
+            # whenever any device listed in a group has any state change.
+            lines.append('  "groups": [')
+            lines.append("")
+            lines.append(
+                '    # Each group fires the "Sensor Monitor: Group Changed" trigger when'
+            )
+            lines.append(
+                '    # any of its devices changes state. Pick the group by name in the'
+            )
+            lines.append(
+                '    # trigger\'s ConfigUI. Format:'
+            )
+            lines.append(
+                '    #   {"name": "doors", "device_ids": [415253439, 1184619127]}'
+            )
+            lines.append("")
+            if preserved_groups:
+                for i, g in enumerate(preserved_groups):
+                    name = str(g.get("name", "")).strip()
+                    ids  = g.get("device_ids", []) or []
+                    if not name:
+                        continue
+                    ids_str = ", ".join(str(int(x)) for x in ids)
+                    comma   = "," if i < len(preserved_groups) - 1 else ""
+                    lines.append(
+                        f'    {{"name": "{name}", "device_ids": [{ids_str}]}}{comma}'
+                    )
+                lines.append("")
             lines.append('  ]')
             lines.append("}")
 
@@ -939,11 +1081,29 @@ class Plugin(indigo.PluginBase):
                 "label": entry.get("label", entry.get("name", f"Variable {var_id}"))
             }
 
+        # --- Build self.groups from "groups" list (v1.7.0) ---
+        # Each entry: {"name": "doors", "device_ids": [123, 456, ...]}
+        # Devices in a group don't need to also appear in "devices" — group
+        # membership is independent of state-change logging.
+        self.groups        = {}
+        self.group_members = set()
+        for entry in config.get("groups", []):
+            name = str(entry.get("name", "")).strip()
+            if not name:
+                continue
+            try:
+                ids = set(int(x) for x in entry.get("device_ids", []))
+            except (TypeError, ValueError):
+                ids = set()
+            self.groups[name]   = ids
+            self.group_members |= ids
+
         try:
             self.logger.info(
                 f"[Sensor Monitor] Config loaded from: {path} "
                 f"({len(self.device_monitor)} devices, "
-                f"{len(self.variable_monitor)} variables)"
+                f"{len(self.variable_monitor)} variables, "
+                f"{len(self.groups)} group(s))"
             )
         except Exception:
             pass  # logger may not be ready during __init__

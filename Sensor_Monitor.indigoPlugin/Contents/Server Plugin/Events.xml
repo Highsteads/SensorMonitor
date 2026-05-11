@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Events>
+
+    <!-- ============================================================
+         Group Change Listener
+         Fires whenever any device in the chosen "group" (defined in
+         sensor_monitor_config.json under the "groups" array) has any
+         state change. Replaces Morris's Group Change Listener with a
+         config-file-driven approach so adding/removing devices is just
+         a text-file edit, not a fiddly multi-select in the trigger UI.
+         ============================================================ -->
+    <Event id="sensorGroupChange">
+        <Name>Sensor Monitor: Group Changed</Name>
+        <ConfigUI>
+            <Field id="instructions" type="label" fontSize="small">
+                <Label>Fires whenever any device in the selected group changes state. Groups are defined in sensor_monitor_config.json — edit that file to add or remove devices from a group.</Label>
+            </Field>
+            <Field id="groupName" type="menu">
+                <Label>Group:</Label>
+                <List class="self" method="getGroupNamesList" dynamicReload="true"/>
+            </Field>
+            <Field id="saveBool" type="checkbox" defaultValue="false">
+                <Label>Save firing device:</Label>
+                <Description>Save the device that triggered this event to an Indigo variable.</Description>
+            </Field>
+            <Field id="saveVar" type="menu" visibleBindingId="saveBool" visibleBindingValue="true">
+                <Label>Save to variable:</Label>
+                <List class="indigo.variables"/>
+            </Field>
+            <Field id="saveType" type="menu" defaultValue="name" visibleBindingId="saveBool" visibleBindingValue="true">
+                <Label>Save value:</Label>
+                <List>
+                    <Option value="name">Device Name</Option>
+                    <Option value="id">Device ID</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Event>
+
+</Events>
