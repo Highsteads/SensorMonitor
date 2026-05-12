@@ -3,21 +3,22 @@
 
     <!-- ============================================================
          Group Change Listener
-         Fires whenever any device in the chosen "group" (defined in
-         sensor_monitor_config.json under the "groups" array) has any
-         state change. Replaces Morris's Group Change Listener with a
-         config-file-driven approach so adding/removing devices is just
-         a text-file edit, not a fiddly multi-select in the trigger UI.
+         Fires whenever any device in the selected Sensor Monitor Group
+         has a state change.  As of v1.8.0, groups are first-class Indigo
+         devices (type smGroup) created via Indigo Devices > New Device.
+         Pre-v1.8.0 triggers configured by group name still work — the
+         plugin falls back to the JSON groups[] array when no
+         groupDevice is set.
          ============================================================ -->
     <Event id="sensorGroupChange">
         <Name>Sensor Monitor: Group Changed</Name>
         <ConfigUI>
             <Field id="instructions" type="label" fontSize="small">
-                <Label>Fires whenever any device in the selected group changes state. Groups are defined in sensor_monitor_config.json — edit that file to add or remove devices from a group.</Label>
+                <Label>Fires whenever any device in the selected group has a state change. Pick the group device (Indigo Devices > New Device > Sensor Monitor Group to create one).</Label>
             </Field>
-            <Field id="groupName" type="menu">
+            <Field id="groupDevice" type="menu">
                 <Label>Group:</Label>
-                <List class="self" method="getGroupNamesList" dynamicReload="true"/>
+                <List class="self" filter="self.smGroup" method="getGroupDeviceList" dynamicReload="true"/>
             </Field>
             <Field id="fireOn" type="menu" defaultValue="any">
                 <Label>Fire on:</Label>
@@ -44,6 +45,14 @@
                     <Option value="name">Device Name</Option>
                     <Option value="id">Device ID</Option>
                 </List>
+            </Field>
+
+            <!-- Legacy: pre-v1.8.0 triggers wrote the JSON group name here.
+                 Kept hidden so existing triggers continue to fire without
+                 needing manual reconfiguration.  New triggers use
+                 groupDevice (above). -->
+            <Field id="groupName" type="textfield" hidden="true" defaultValue="">
+                <Label>groupName (legacy)</Label>
             </Field>
         </ConfigUI>
     </Event>

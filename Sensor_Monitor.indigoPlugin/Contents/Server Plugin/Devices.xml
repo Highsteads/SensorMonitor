@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Devices>
+
+    <!-- ============================================================
+         Sensor Monitor Group (smGroup)
+         Each device represents a named group of Indigo devices whose
+         state changes should fire a "Sensor Monitor: Group Changed"
+         trigger.  Replaces the JSON groups[] array as of v1.8.0 — JSON
+         groups still load for backward compatibility, but new groups
+         should be created as smGroup devices via the standard Indigo
+         "New Device" flow.
+
+         ConfigUI uses the two-list "Available / Members" pattern with
+         folder filtering — Indigo has no native checkbox-list widget,
+         so this is the cleanest UX achievable in the platform.
+         ============================================================ -->
+    <Device type="custom" id="smGroup">
+        <Name>Sensor Monitor Group</Name>
+        <ConfigUI>
+
+            <Field id="instructions" type="label" fontSize="small">
+                <Label>Pick a folder to filter the Available list, select the devices you want, and click "Add to Group". To remove members, select them in the Members list and click "Remove from Group".</Label>
+            </Field>
+
+            <Field id="folderFilter" type="menu" defaultValue="__all__">
+                <Label>Show devices from:</Label>
+                <List class="self" filter="" method="getFolderList" dynamicReload="true"/>
+            </Field>
+
+            <Field id="availableList" type="list" rows="10">
+                <Label>Available devices:</Label>
+                <List class="self" filter="" method="getAvailableDevices" dynamicReload="true"/>
+            </Field>
+
+            <Field id="addButton" type="button">
+                <Label/>
+                <Title>Add to Group  ↓</Title>
+                <CallbackMethod>addToGroup</CallbackMethod>
+            </Field>
+
+            <Field id="membersLabel" type="label" fontColor="darkgray" fontSize="small">
+                <Label>Current group members:</Label>
+            </Field>
+
+            <Field id="memberList" type="list" rows="10">
+                <Label/>
+                <List class="self" filter="" method="getMemberDevices" dynamicReload="true"/>
+            </Field>
+
+            <Field id="removeButton" type="button">
+                <Label/>
+                <Title>↑  Remove from Group</Title>
+                <CallbackMethod>removeFromGroup</CallbackMethod>
+            </Field>
+
+            <!-- Persistent storage: comma-separated device IDs.  Indigo
+                 list-type pluginProps are quirky, so we serialise to a
+                 string and parse on the fly. -->
+            <Field id="memberIds" type="textfield" hidden="true" defaultValue="">
+                <Label>memberIds</Label>
+            </Field>
+
+        </ConfigUI>
+
+        <States>
+            <State id="memberCount">
+                <ValueType>Integer</ValueType>
+                <TriggerLabel>Member count changes</TriggerLabel>
+                <ControlPageLabel>Members</ControlPageLabel>
+            </State>
+            <State id="lastFiringDevice">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last firing device changes</TriggerLabel>
+                <ControlPageLabel>Last Firing Device</ControlPageLabel>
+            </State>
+            <State id="lastFiringTime">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last firing time changes</TriggerLabel>
+                <ControlPageLabel>Last Firing Time</ControlPageLabel>
+            </State>
+            <State id="lastFiringDirection">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last direction changes</TriggerLabel>
+                <ControlPageLabel>Last Direction</ControlPageLabel>
+            </State>
+            <State id="status">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Status changes</TriggerLabel>
+                <ControlPageLabel>Status</ControlPageLabel>
+            </State>
+        </States>
+        <UiDisplayStateId>status</UiDisplayStateId>
+    </Device>
+
+</Devices>
