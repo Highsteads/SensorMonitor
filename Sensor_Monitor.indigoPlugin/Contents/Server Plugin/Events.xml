@@ -46,14 +46,6 @@
                     <Option value="id">Device ID</Option>
                 </List>
             </Field>
-
-            <!-- Legacy: pre-v1.8.0 triggers wrote the JSON group name here.
-                 Kept hidden so existing triggers continue to fire without
-                 needing manual reconfiguration.  New triggers use
-                 groupDevice (above). -->
-            <Field id="groupName" type="textfield" hidden="true" defaultValue="">
-                <Label>groupName (legacy)</Label>
-            </Field>
         </ConfigUI>
     </Event>
 

@@ -4,7 +4,14 @@
 # Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        12-05-2026
-# Version:     1.8.0
+# Version:     1.8.1
+#
+# v1.8.1 (12-05-2026):
+# - Dropped the legacy JSON groups[] code path and the v1.7.x ->
+#   v1.8.0 migration helper. Groups now live exclusively as smGroup
+#   Indigo devices; the JSON file is no longer scanned for a groups[]
+#   array, the hidden "groupName" trigger field is gone, and Discover
+#   Devices no longer writes a groups[] block. Lighter, simpler code path.
 #
 # v1.8.0 (12-05-2026):
 # - Groups are now first-class Indigo devices (type "Sensor Monitor Group",
@@ -304,22 +311,12 @@ class Plugin(indigo.PluginBase):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self.debug = pluginPrefs.get("showDebugInfo", False)
 
-        # Group-change machinery. Two source-of-truth dicts feed one
-        # consolidated index that the hot path inside deviceUpdated reads:
-        #
-        #   json_groups       legacy v1.7.x JSON groups[] entries
-        #                     (kept for backward compat; preferred source
-        #                      is now smGroup devices)
-        #   device_groups     smGroup devices (v1.8.0+); populated by
-        #                     deviceStartComm
-        #
-        # _rebuild_group_index() recomputes group_members + group_name_to_dev_id
-        # from those two whenever either changes.
-        self.json_groups          = {}    # {group_name: set(device_ids)}
-        self.device_groups        = {}    # {smGroup_dev_id: {"name", "members"}}
-        self.group_members        = set() # union — fast O(1) test in deviceUpdated
-        self.group_name_to_dev_id = {}    # {group_name: smGroup_dev_id}
-        self.event_triggers       = {}    # {trigger.id: indigo.trigger}
+        # Group-change machinery. smGroup devices are the only source of
+        # truth (v1.8.1+). _rebuild_group_index() recomputes group_members
+        # from device_groups whenever it changes.
+        self.device_groups   = {}    # {smGroup_dev_id: {"name", "members"}}
+        self.group_members   = set() # union — fast O(1) test in deviceUpdated
+        self.event_triggers  = {}    # {trigger.id: indigo.trigger}
 
         # Migration must run before _load_config so the loader sees the file
         # at its new location. self.logger isn't fully ready inside __init__,
@@ -336,12 +333,6 @@ class Plugin(indigo.PluginBase):
     def startup(self):
         indigo.devices.subscribeToChanges()
         indigo.variables.subscribeToChanges()
-        # One-time migration: any JSON groups[] entries that don't already
-        # exist as smGroup devices get created. Idempotent across startups.
-        try:
-            self._migrate_json_groups_to_devices()
-        except Exception as exc:
-            self.logger.error(f"[Sensor Monitor] Migration error: {exc}")
         self.logger.info(
             f"Sensor Monitor {self.pluginVersion} started - "
             f"monitoring {len(self.device_monitor)} devices, "
@@ -498,20 +489,16 @@ class Plugin(indigo.PluginBase):
     def triggerStartProcessing(self, trigger):
         """Indigo calls this when an enabled trigger of one of our event
         types is loaded — we store the trigger so deviceUpdated() can fire it.
-        Confirmed pattern per global CLAUDE.md (ZwaveLockManager-style;
-        indigo.server.fireEvent() does NOT exist on PluginBase)."""
+        Pattern: store trigger in self.event_triggers, then iterate that
+        dict on device updates and call indigo.trigger.execute() on matches.
+        (indigo.server.fireEvent and self.triggerEvent do NOT exist.)"""
         self.event_triggers[trigger.id] = trigger
-        members = self._resolve_trigger_group(trigger)
-        if not members:
-            label = (
-                trigger.pluginProps.get("groupDevice")
-                or trigger.pluginProps.get("groupName")
-                or "(unset)"
-            )
+        if not self._resolve_trigger_group(trigger):
+            label = trigger.pluginProps.get("groupDevice", "(unset)")
             self.logger.warning(
-                f"[Sensor Monitor] Trigger '{trigger.name}' references "
-                f"unknown or empty group ({label}) — open the trigger and "
-                f"pick a Group, or check the smGroup device exists."
+                f"[Sensor Monitor] Trigger '{trigger.name}' has no group "
+                f"selected ({label}) — open the trigger and pick a Sensor "
+                f"Monitor Group device."
             )
 
     def triggerStopProcessing(self, trigger):
@@ -527,28 +514,15 @@ class Plugin(indigo.PluginBase):
         return result if result else [("none", "-- No Sensor Monitor Group devices yet --")]
 
     def _resolve_trigger_group(self, trigger):
-        """Return the set of device IDs this trigger's group covers.
-
-        Resolution order:
-          1. groupDevice prop -> look up the smGroup device's members
-          2. groupName prop (legacy) -> match device-defined group by name
-          3. groupName prop -> match JSON-defined group by name (fallback)
-        """
+        """Return the set of device IDs the trigger's smGroup covers."""
         dev_id_str = str(trigger.pluginProps.get("groupDevice", "") or "").strip()
         if dev_id_str and dev_id_str != "none":
             try:
                 dev_id = int(dev_id_str)
             except ValueError:
-                dev_id = 0
-            if dev_id and dev_id in self.device_groups:
+                return set()
+            if dev_id in self.device_groups:
                 return self.device_groups[dev_id]["members"]
-        # Legacy fallback
-        name = str(trigger.pluginProps.get("groupName", "") or "").strip()
-        if name:
-            dev_id = self.group_name_to_dev_id.get(name)
-            if dev_id is not None:
-                return self.device_groups[dev_id]["members"]
-            return self.json_groups.get(name, set())
         return set()
 
     def _fire_group_triggers(self, origDev, newDev):
@@ -682,19 +656,11 @@ class Plugin(indigo.PluginBase):
         return ",".join(str(int(x)) for x in sorted(ids))
 
     def _rebuild_group_index(self):
-        """Recompute group_members (union) and group_name_to_dev_id lookup
-        from json_groups + device_groups. Devices win over JSON when names
-        collide."""
+        """Recompute group_members (union of all smGroup devices' members)."""
         all_members = set()
-        name_to_dev = {}
-        for dev_id, info in self.device_groups.items():
+        for info in self.device_groups.values():
             all_members |= info.get("members", set())
-            name_to_dev[info.get("name", "")] = dev_id
-        for name, ids in self.json_groups.items():
-            all_members |= ids
-            # Don't shadow a device entry with the same name
-        self.group_members        = all_members
-        self.group_name_to_dev_id = name_to_dev
+        self.group_members = all_members
 
     def getFolderList(self, filter="", valuesDict=None, typeId="", targetId=0):
         """Folder dropdown for the smGroup ConfigUI. Returns (id, label) tuples."""
@@ -798,74 +764,6 @@ class Plugin(indigo.PluginBase):
             values["memberIds"] = ""
         return (values, errors)
 
-    # ======================================
-    # JSON-GROUPS -> smGroup DEVICE MIGRATION (v1.8.0)
-    # ======================================
-
-    def _migrate_json_groups_to_devices(self):
-        """One-time migration: turn each JSON groups[] entry into an smGroup
-        device. Idempotent — skips groups whose name already matches an
-        existing smGroup device. Leaves the JSON file untouched so legacy
-        triggers (with groupName but no groupDevice) keep firing while the
-        user re-points them at the new device picker.
-        """
-        if not self.json_groups:
-            return
-
-        existing_names = {info.get("name", "") for info in self.device_groups.values()}
-        # Also scan all indigo.devices for smGroup-typed devices that may not
-        # have hit deviceStartComm yet (race-protective).
-        try:
-            for dev in indigo.devices.iter("self.smGroup"):
-                existing_names.add(dev.name)
-        except Exception:
-            pass
-
-        missing = [(n, ids) for n, ids in self.json_groups.items() if n not in existing_names]
-        if not missing:
-            return
-
-        # Find or create a "Sensor Monitor Groups" device folder
-        folder_id = 0
-        target_folder_name = "Sensor Monitor Groups"
-        try:
-            for f in indigo.devices.folders:
-                if f.name == target_folder_name:
-                    folder_id = f.id
-                    break
-            if not folder_id:
-                folder_id = indigo.devices.folder.create(target_folder_name).id
-                self.logger.info(
-                    f"[Sensor Monitor] Created device folder '{target_folder_name}'"
-                )
-        except Exception as exc:
-            self.logger.warning(
-                f"[Sensor Monitor] Could not create migration folder: {exc}"
-            )
-
-        for name, ids in missing:
-            try:
-                props = indigo.Dict()
-                props["memberIds"]    = self._serialise_member_ids(ids)
-                props["folderFilter"] = "__all__"
-                dev = indigo.device.create(
-                    protocol     = indigo.kProtocol.Plugin,
-                    address      = "",
-                    deviceTypeId = "smGroup",
-                    name         = name,
-                    description  = "Migrated from sensor_monitor_config.json",
-                    props        = props,
-                    folder       = folder_id,
-                )
-                self.logger.info(
-                    f"[Sensor Monitor] Migrated JSON group '{name}' "
-                    f"({len(ids)} device{'s' if len(ids) != 1 else ''}) "
-                    f"-> smGroup device id={dev.id}"
-                )
-            except Exception as exc:
-                self.logger.warning(
-                    f"[Sensor Monitor] Could not migrate group '{name}': {exc}"
-                )
 
     def _save_firing_device(self, trigger, dev):
         """Write the firing device's name or id to the configured variable."""
@@ -909,9 +807,8 @@ class Plugin(indigo.PluginBase):
         ts = datetime.now().strftime('%H:%M:%S')
         self.logger.info(f"[{ts}] [Sensor Monitor] Device discovery starting...")
 
-        # --- Read excluded_ids + groups from existing config (preserved across re-discovery) ---
-        excluded_ids     = set()
-        preserved_groups = []
+        # --- Read excluded_ids from existing config (preserved across re-discovery) ---
+        excluded_ids = set()
         if os.path.exists(CONFIG_PATH):
             try:
                 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -920,20 +817,13 @@ class Plugin(indigo.PluginBase):
                 json_str     = re.sub(r",(\s*[}\]])", r"\1", "".join(active_lines))
                 existing_cfg = json.loads(json_str)
                 excluded_ids = set(int(x) for x in existing_cfg.get("excluded_ids", []))
-                preserved_groups = existing_cfg.get("groups", []) or []
                 if excluded_ids:
                     self.logger.info(
                         f"[{ts}] [Sensor Monitor] Preserving {len(excluded_ids)} "
                         f"excluded device(s) from existing config"
                     )
-                if preserved_groups:
-                    self.logger.info(
-                        f"[{ts}] [Sensor Monitor] Preserving "
-                        f"{len(preserved_groups)} group(s) from existing config"
-                    )
             except Exception:
-                excluded_ids     = set()
-                preserved_groups = []
+                excluded_ids = set()
 
         all_devices     = []
         contact_sensors = []
@@ -1080,37 +970,6 @@ class Plugin(indigo.PluginBase):
                 '    # Add variables: {"id": 123456789, "name": "Var_Name", "label": "Display Label"}'
             )
             lines.append("")
-            lines.append('  ],')
-            lines.append("")
-            # --- groups: fire a custom "Sensor Monitor: Group Changed" trigger
-            # whenever any device listed in a group has any state change.
-            lines.append('  "groups": [')
-            lines.append("")
-            lines.append(
-                '    # Each group fires the "Sensor Monitor: Group Changed" trigger when'
-            )
-            lines.append(
-                '    # any of its devices changes state. Pick the group by name in the'
-            )
-            lines.append(
-                '    # trigger\'s ConfigUI. Format:'
-            )
-            lines.append(
-                '    #   {"name": "doors", "device_ids": [415253439, 1184619127]}'
-            )
-            lines.append("")
-            if preserved_groups:
-                for i, g in enumerate(preserved_groups):
-                    name = str(g.get("name", "")).strip()
-                    ids  = g.get("device_ids", []) or []
-                    if not name:
-                        continue
-                    ids_str = ", ".join(str(int(x)) for x in ids)
-                    comma   = "," if i < len(preserved_groups) - 1 else ""
-                    lines.append(
-                        f'    {{"name": "{name}", "device_ids": [{ids_str}]}}{comma}'
-                    )
-                lines.append("")
             lines.append('  ]')
             lines.append("}")
 
@@ -1545,29 +1404,14 @@ class Plugin(indigo.PluginBase):
                 "label": entry.get("label", entry.get("name", f"Variable {var_id}"))
             }
 
-        # --- Build self.json_groups from "groups" list ---
-        # v1.7.x put group definitions in JSON; v1.8.0 prefers smGroup
-        # devices but keeps this loader for backward compatibility. Devices
-        # with the same name take precedence in the resolution path.
-        self.json_groups = {}
-        for entry in config.get("groups", []):
-            name = str(entry.get("name", "")).strip()
-            if not name:
-                continue
-            try:
-                ids = set(int(x) for x in entry.get("device_ids", []))
-            except (TypeError, ValueError):
-                ids = set()
-            self.json_groups[name] = ids
-
-        self._rebuild_group_index()
-
+        # Groups are smGroup Indigo devices as of v1.8.1; they're loaded
+        # by deviceStartComm, not by this method. self.device_groups is
+        # untouched here.
         try:
             self.logger.info(
                 f"[Sensor Monitor] Config loaded from: {path} "
                 f"({len(self.device_monitor)} devices, "
-                f"{len(self.variable_monitor)} variables, "
-                f"{len(self.json_groups)} legacy JSON group(s))"
+                f"{len(self.variable_monitor)} variables)"
             )
         except Exception:
             pass  # logger may not be ready during __init__
