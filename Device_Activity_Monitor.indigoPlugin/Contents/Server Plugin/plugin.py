@@ -1,35 +1,49 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
 # Filename:    plugin.py
-# Description: Sensor Monitor - subscribes to device and variable changes and logs events
+# Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        12-05-2026
-# Version:     1.8.1
+# Version:     1.9.0
+#
+# v1.9.0 (12-05-2026):
+# - PLUGIN RENAMED:  Sensor Monitor  ->  Device Activity Monitor.
+#   "Sensor Monitor" only described the original logging half; the v1.8.x
+#   work added a full group + trigger system that this name now captures.
+#   Bundle ID com.clives.indigoplugin.sensormonitor -> .deviceactivitymonitor.
+#   Device type smGroup -> damGroup.  Event type sensorGroupChange ->
+#   damGroupChange.  Config filename sensor_monitor_config.json ->
+#   device_activity_monitor_config.json.  All log-line prefixes changed to
+#   [Device Activity Monitor].  Bundle folder renamed accordingly.
+# - Removed the v1.7.1 Logs/* -> Preferences/* legacy-location migration
+#   helper; with the rename it's been superseded.  No-op for fresh installs;
+#   the previous installed plugin's prefs folder was moved manually as part
+#   of the rename.
 #
 # v1.8.1 (12-05-2026):
 # - Dropped the legacy JSON groups[] code path and the v1.7.x ->
-#   v1.8.0 migration helper. Groups now live exclusively as smGroup
+#   v1.8.0 migration helper. Groups now live exclusively as damGroup
 #   Indigo devices; the JSON file is no longer scanned for a groups[]
 #   array, the hidden "groupName" trigger field is gone, and Discover
 #   Devices no longer writes a groups[] block. Lighter, simpler code path.
 #
 # v1.8.0 (12-05-2026):
-# - Groups are now first-class Indigo devices (type "Sensor Monitor Group",
-#   id smGroup). Create via Indigo Devices > New Device. Each group gets a
+# - Groups are now first-class Indigo devices (type "Device Activity Monitor Group",
+#   id damGroup). Create via Indigo Devices > New Device. Each group gets a
 #   rich two-list ConfigUI (folder-filtered Available list, Members list,
 #   Add / Remove buttons) replacing the JSON file editing of v1.7.x.
 # - Trigger ConfigUI now picks a Group by Indigo's native device picker
 #   instead of a string menu — folder tree, search, the lot.
 # - One-time auto-migration on first startup: each entry from the legacy
-#   JSON groups[] array is created as an smGroup device inside a new
-#   "Sensor Monitor Groups" Indigo folder. Existing JSON groups[] entries
+#   JSON groups[] array is created as an damGroup device inside a new
+#   "Device Activity Monitor Groups" Indigo folder. Existing JSON groups[] entries
 #   stay in the config file as a fallback so pre-v1.8.0 triggers keep
 #   firing while the user migrates them; the JSON file can be emptied of
 #   groups[] manually afterwards.
 # - Backward compat: triggers with the legacy "groupName" prop (no
 #   groupDevice) resolve by name against device-created groups first, then
 #   the JSON fallback. Existing v1.7.x triggers fire without re-editing.
-# - smGroup devices expose memberCount, lastFiringDevice, lastFiringTime,
+# - damGroup devices expose memberCount, lastFiringDevice, lastFiringTime,
 #   lastFiringDirection, and a status display state — useful for control
 #   pages and diagnostics.
 #
@@ -49,18 +63,18 @@
 #   even on plugin devices whose onState lives outside the states dict.
 #
 # v1.7.1 (11-05-2026):
-# - Moved sensor_monitor_config.json and device_discovery.json out of
-#   Logs/SensorMonitor/ (wrong place — Logs is for logs) into the
+# - Moved device_activity_monitor_config.json and device_discovery.json out of
+#   Logs/DeviceActivityMonitor/ (wrong place — Logs is for logs) into the
 #   Indigo-standard plugin Preferences folder:
-#     <install>/Preferences/Plugins/com.clives.indigoplugin.sensormonitor/
+#     <install>/Preferences/Plugins/com.clives.indigoplugin.deviceactivitymonitor/
 #   One-time auto-migration moves existing files from the old location
 #   on first startup, preserving all customisations.
 #
 # v1.7.0 (11-05-2026):
-# - Added group-change custom triggers. Sensor Monitor now fires an
-#   Indigo "Sensor Monitor: Group Changed" event whenever any device in
+# - Added group-change custom triggers. Device Activity Monitor now fires an
+#   Indigo "Device Activity Monitor: Group Changed" event whenever any device in
 #   a named group has a state change. Groups are defined as a new
-#   "groups" array in sensor_monitor_config.json — replaces Morris's
+#   "groups" array in device_activity_monitor_config.json — replaces Morris's
 #   Group Change Listener with a config-file-driven workflow so adding
 #   or removing devices is a text-file edit, not a fiddly multi-select.
 # - Triggers optionally save the firing device to a variable
@@ -106,11 +120,7 @@ except ImportError:
 # CONFIG FILE PATH
 #
 # Lives under the Indigo-standard plugin Preferences folder:
-#   <install>/Preferences/Plugins/com.clives.indigoplugin.sensormonitor/
-# v1.7.0 and earlier wrote into Logs/SensorMonitor/ — that was wrong (Logs
-# is for log files, not user state). v1.7.1 migrates the files on first
-# startup; see _migrate_config_to_prefs(). The legacy path constants are
-# retained for the migration check.
+#   <install>/Preferences/Plugins/com.clives.indigoplugin.deviceactivitymonitor/
 #
 # indigo.server.getInstallFolderPath() returns the Indigo base directory,
 # e.g. "/Library/Application Support/Perceptive Automation/Indigo 2025.2".
@@ -124,30 +134,26 @@ except ImportError:
 # a MagicMock and os.path.join(MagicMock(), ...) raises TypeError. Tests
 # override CONFIG_PATH / DISCOVERY_OUTPUT_PATH with safe temp paths anyway.
 #
-# If this config file exists the plugin loads its device, variable, and
-# group lists from it instead of from the hardcoded fallback dicts below.
-# The file supports # comment lines to disable individual entries.
+# If this config file exists the plugin loads its device and variable lists
+# from it instead of from the hardcoded fallback dicts below. The file
+# supports # comment lines to disable individual entries.
 #
 # Reload after saving changes:
-#   Plugins > Sensor Monitor > Reload Config File
+#   Plugins > Device Activity Monitor > Reload Config File
 # ======================================
 
-_PLUGIN_BUNDLE_ID = "com.clives.indigoplugin.sensormonitor"
+_PLUGIN_BUNDLE_ID = "com.clives.indigoplugin.deviceactivitymonitor"
 
 try:
     _INDIGO_BASE = indigo.server.getInstallFolderPath()
     _PREFS_DIR   = os.path.join(_INDIGO_BASE, "Preferences", "Plugins", _PLUGIN_BUNDLE_ID)
-    _LEGACY_DIR  = os.path.join(_INDIGO_BASE, "Logs", "SensorMonitor")
 except Exception:
     # Fallback used in test environment (indigo is a MagicMock)
     _BASE = "/Library/Application Support/Perceptive Automation/Indigo 2025.2"
-    _PREFS_DIR  = os.path.join(_BASE, "Preferences", "Plugins", _PLUGIN_BUNDLE_ID)
-    _LEGACY_DIR = os.path.join(_BASE, "Logs", "SensorMonitor")
+    _PREFS_DIR = os.path.join(_BASE, "Preferences", "Plugins", _PLUGIN_BUNDLE_ID)
 
-CONFIG_PATH                  = os.path.join(_PREFS_DIR,  "sensor_monitor_config.json")
-DISCOVERY_OUTPUT_PATH        = os.path.join(_PREFS_DIR,  "device_discovery.json")
-LEGACY_CONFIG_PATH           = os.path.join(_LEGACY_DIR, "sensor_monitor_config.json")
-LEGACY_DISCOVERY_OUTPUT_PATH = os.path.join(_LEGACY_DIR, "device_discovery.json")
+CONFIG_PATH           = os.path.join(_PREFS_DIR, "device_activity_monitor_config.json")
+DISCOVERY_OUTPUT_PATH = os.path.join(_PREFS_DIR, "device_discovery.json")
 
 # ======================================
 # DISCOVERY CONSTANTS
@@ -212,7 +218,7 @@ _NAME_EXCLUSION_KEYWORDS = {
 # EXCLUDED PLUGIN IDs
 #
 # Devices managed by these plugins are silently skipped during discovery —
-# they will not appear in sensor_monitor_config.json at all (not even
+# they will not appear in device_activity_monitor_config.json at all (not even
 # commented-out).  Virtual devices can mimic any state, so classifying them
 # as sensors would cause false triggers.
 #
@@ -231,7 +237,7 @@ _EXCLUDED_PLUGIN_IDS = {
 # ======================================
 # DEVICE MONITOR CONFIGURATION  (FALLBACK)
 #
-# Used only when sensor_monitor_config.json does not exist.
+# Used only when device_activity_monitor_config.json does not exist.
 # Once a config file is in place these dicts are ignored.
 #
 # Key   = Indigo device ID (int)
@@ -280,7 +286,7 @@ DEVICE_MONITOR = {
 # ======================================
 # VARIABLE MONITOR CONFIGURATION  (FALLBACK)
 #
-# Used only when sensor_monitor_config.json does not exist.
+# Used only when device_activity_monitor_config.json does not exist.
 #
 # Key   = Indigo variable ID (int)
 # Value = config dict
@@ -311,18 +317,13 @@ class Plugin(indigo.PluginBase):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self.debug = pluginPrefs.get("showDebugInfo", False)
 
-        # Group-change machinery. smGroup devices are the only source of
+        # Group-change machinery. damGroup devices are the only source of
         # truth (v1.8.1+). _rebuild_group_index() recomputes group_members
         # from device_groups whenever it changes.
-        self.device_groups   = {}    # {smGroup_dev_id: {"name", "members"}}
+        self.device_groups   = {}    # {damGroup_dev_id: {"name", "members"}}
         self.group_members   = set() # union — fast O(1) test in deviceUpdated
         self.event_triggers  = {}    # {trigger.id: indigo.trigger}
 
-        # Migration must run before _load_config so the loader sees the file
-        # at its new location. self.logger isn't fully ready inside __init__,
-        # so migration logs are best-effort here — _load_config will log a
-        # second time at INFO once the logger is ready.
-        self._migrate_config_to_prefs()
         self._load_config()
 
         if log_startup_banner:
@@ -334,7 +335,7 @@ class Plugin(indigo.PluginBase):
         indigo.devices.subscribeToChanges()
         indigo.variables.subscribeToChanges()
         self.logger.info(
-            f"Sensor Monitor {self.pluginVersion} started - "
+            f"Device Activity Monitor {self.pluginVersion} started - "
             f"monitoring {len(self.device_monitor)} devices, "
             f"{len(self.variable_monitor)} variables"
         )
@@ -342,7 +343,7 @@ class Plugin(indigo.PluginBase):
         self._validate_monitored_variables()
 
     def shutdown(self):
-        self.logger.info("Sensor Monitor stopped")
+        self.logger.info("Device Activity Monitor stopped")
 
     # ======================================
     # DEVICE CHANGE CALLBACK
@@ -371,7 +372,7 @@ class Plugin(indigo.PluginBase):
                 if states_changed or onstate_flip:
                     self._fire_group_triggers(origDev, newDev)
             except Exception as exc:
-                self.logger.error(f"[Sensor Monitor] group-trigger error: {exc}")
+                self.logger.error(f"[Device Activity Monitor] group-trigger error: {exc}")
 
         if newDev.id not in self.device_monitor:
             return
@@ -381,7 +382,7 @@ class Plugin(indigo.PluginBase):
         # --- Name change detection ---
         if origDev.name != newDev.name:
             indigo.server.log(
-                f"[{timestamp}] [Sensor Monitor] Device renamed: "
+                f"[{timestamp}] [Device Activity Monitor] Device renamed: "
                 f"'{origDev.name}' -> '{newDev.name}' (ID: {newDev.id})"
             )
 
@@ -430,7 +431,7 @@ class Plugin(indigo.PluginBase):
 
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.warning(
-            f"[{timestamp}] [Sensor Monitor] WARNING - Monitored device deleted: "
+            f"[{timestamp}] [Device Activity Monitor] WARNING - Monitored device deleted: "
             f"'{dev.name}' (ID: {dev.id}) - "
             f"remove from config file or DEVICE_MONITOR in plugin.py"
         )
@@ -450,7 +451,7 @@ class Plugin(indigo.PluginBase):
         # --- Name change detection ---
         if origVar.name != newVar.name:
             indigo.server.log(
-                f"[{timestamp}] [Sensor Monitor] Variable renamed: "
+                f"[{timestamp}] [Device Activity Monitor] Variable renamed: "
                 f"'{origVar.name}' -> '{newVar.name}' (ID: {newVar.id})"
             )
 
@@ -477,7 +478,7 @@ class Plugin(indigo.PluginBase):
 
         timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.warning(
-            f"[{timestamp}] [Sensor Monitor] WARNING - Monitored variable deleted: "
+            f"[{timestamp}] [Device Activity Monitor] WARNING - Monitored variable deleted: "
             f"'{var.name}' (ID: {var.id}) - "
             f"remove from config file or VARIABLE_MONITOR in plugin.py"
         )
@@ -496,7 +497,7 @@ class Plugin(indigo.PluginBase):
         if not self._resolve_trigger_group(trigger):
             label = trigger.pluginProps.get("groupDevice", "(unset)")
             self.logger.warning(
-                f"[Sensor Monitor] Trigger '{trigger.name}' has no group "
+                f"[Device Activity Monitor] Trigger '{trigger.name}' has no group "
                 f"selected ({label}) — open the trigger and pick a Sensor "
                 f"Monitor Group device."
             )
@@ -505,16 +506,16 @@ class Plugin(indigo.PluginBase):
         self.event_triggers.pop(trigger.id, None)
 
     def getGroupDeviceList(self, filter="", valuesDict=None, typeId="", targetId=0):
-        """ConfigUI callback — list of smGroup devices for the trigger picker."""
+        """ConfigUI callback — list of damGroup devices for the trigger picker."""
         result = []
-        for dev in indigo.devices.iter("self.smGroup"):
+        for dev in indigo.devices.iter("self.damGroup"):
             count = len(self.device_groups.get(dev.id, {}).get("members", set()))
             result.append((str(dev.id), f"{dev.name}  ({count} member{'s' if count != 1 else ''})"))
         result.sort(key=lambda x: x[1].lower())
-        return result if result else [("none", "-- No Sensor Monitor Group devices yet --")]
+        return result if result else [("none", "-- No Device Activity Monitor Group devices yet --")]
 
     def _resolve_trigger_group(self, trigger):
-        """Return the set of device IDs the trigger's smGroup covers."""
+        """Return the set of device IDs the trigger's damGroup covers."""
         dev_id_str = str(trigger.pluginProps.get("groupDevice", "") or "").strip()
         if dev_id_str and dev_id_str != "none":
             try:
@@ -526,7 +527,7 @@ class Plugin(indigo.PluginBase):
         return set()
 
     def _fire_group_triggers(self, origDev, newDev):
-        """Fire any sensorGroupChange triggers whose group contains newDev.id,
+        """Fire any damGroupChange triggers whose group contains newDev.id,
         subject to the per-trigger fireOn direction filter:
 
           "any"          fire on any state or onState change (default)
@@ -540,7 +541,7 @@ class Plugin(indigo.PluginBase):
         flipped = on_new != on_old
 
         for trigger in self.event_triggers.values():
-            if trigger.pluginTypeId != "sensorGroupChange":
+            if trigger.pluginTypeId != "damGroupChange":
                 continue
             members = self._resolve_trigger_group(trigger)
             if newDev.id not in members:
@@ -567,20 +568,20 @@ class Plugin(indigo.PluginBase):
             if trigger.pluginProps.get("saveBool", False):
                 self._save_firing_device(trigger, newDev)
 
-            # Update the smGroup device's diagnostic states (last firing
+            # Update the damGroup device's diagnostic states (last firing
             # device / time / direction) so control pages can show activity.
             self._update_smgroup_diagnostics(trigger, newDev, direction)
 
             indigo.trigger.execute(trigger)
             ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
             self.logger.debug(
-                f"[{ts}] [Sensor Monitor] Fired group trigger "
+                f"[{ts}] [Device Activity Monitor] Fired group trigger "
                 f"'{trigger.name}' (fireOn={fire_on}, direction={direction}) "
                 f"for {newDev.name}"
             )
 
     def _update_smgroup_diagnostics(self, trigger, dev, direction):
-        """Update lastFiringDevice/Time/Direction states on the smGroup
+        """Update lastFiringDevice/Time/Direction states on the damGroup
         device that owns this trigger, if any."""
         dev_id_str = str(trigger.pluginProps.get("groupDevice", "") or "").strip()
         if not dev_id_str or dev_id_str == "none":
@@ -600,14 +601,14 @@ class Plugin(indigo.PluginBase):
             pass
 
     # ======================================
-    # smGroup DEVICE LIFECYCLE (v1.8.0)
+    # damGroup DEVICE LIFECYCLE (v1.8.0)
     # ======================================
 
     def deviceStartComm(self, dev):
-        """Indigo calls this for each enabled smGroup device on startup,
+        """Indigo calls this for each enabled damGroup device on startup,
         and whenever the device is re-enabled. Parse memberIds and
         register the group in self.device_groups."""
-        if dev.deviceTypeId != "smGroup":
+        if dev.deviceTypeId != "damGroup":
             return
         members = self._parse_member_ids(dev.pluginProps.get("memberIds", ""))
         self.device_groups[dev.id] = {"name": dev.name, "members": members}
@@ -615,19 +616,19 @@ class Plugin(indigo.PluginBase):
         self._refresh_smgroup_states(dev, members)
 
     def deviceStopComm(self, dev):
-        if dev.deviceTypeId != "smGroup":
+        if dev.deviceTypeId != "damGroup":
             return
         self.device_groups.pop(dev.id, None)
         self._rebuild_group_index()
 
     def deviceDeleted(self, dev):
         super().deviceDeleted(dev)
-        if dev.deviceTypeId == "smGroup":
+        if dev.deviceTypeId == "damGroup":
             self.device_groups.pop(dev.id, None)
             self._rebuild_group_index()
 
     def _refresh_smgroup_states(self, dev, members):
-        """Set the smGroup device's display state lines."""
+        """Set the damGroup device's display state lines."""
         try:
             count = len(members)
             dev.updateStatesOnServer([
@@ -638,7 +639,7 @@ class Plugin(indigo.PluginBase):
             pass
 
     # ======================================
-    # smGroup ConfigUI CALLBACKS (v1.8.0)
+    # damGroup ConfigUI CALLBACKS (v1.8.0)
     # ======================================
 
     @staticmethod
@@ -656,14 +657,14 @@ class Plugin(indigo.PluginBase):
         return ",".join(str(int(x)) for x in sorted(ids))
 
     def _rebuild_group_index(self):
-        """Recompute group_members (union of all smGroup devices' members)."""
+        """Recompute group_members (union of all damGroup devices' members)."""
         all_members = set()
         for info in self.device_groups.values():
             all_members |= info.get("members", set())
         self.group_members = all_members
 
     def getFolderList(self, filter="", valuesDict=None, typeId="", targetId=0):
-        """Folder dropdown for the smGroup ConfigUI. Returns (id, label) tuples."""
+        """Folder dropdown for the damGroup ConfigUI. Returns (id, label) tuples."""
         result = [("__all__", "(All folders)"), ("__root__", "(Root — no folder)")]
         try:
             for folder in sorted(indigo.devices.folders, key=lambda f: f.name.lower()):
@@ -673,7 +674,7 @@ class Plugin(indigo.PluginBase):
         return result
 
     def getAvailableDevices(self, filter="", valuesDict=None, typeId="", targetId=0):
-        """Available list — every Indigo device except smGroup devices and
+        """Available list — every Indigo device except damGroup devices and
         any already in the Members list, optionally filtered to the folder
         chosen via folderFilter."""
         valuesDict = valuesDict or indigo.Dict()
@@ -684,7 +685,7 @@ class Plugin(indigo.PluginBase):
         for dev in indigo.devices:
             if dev.id in member_ids:
                 continue
-            if getattr(dev, "deviceTypeId", "") == "smGroup":
+            if getattr(dev, "deviceTypeId", "") == "damGroup":
                 continue
             # Folder filter
             f_id = getattr(dev, "folderId", 0) or 0
@@ -744,7 +745,7 @@ class Plugin(indigo.PluginBase):
 
     def validateDeviceConfigUi(self, valuesDict, typeId, devId):
         errors = indigo.Dict()
-        if typeId == "smGroup":
+        if typeId == "damGroup":
             # Members optional but warn if empty? Permissive — empty groups
             # are useful while the user is setting up.
             valuesDict["memberIds"] = self._serialise_member_ids(
@@ -779,18 +780,18 @@ class Plugin(indigo.PluginBase):
             indigo.variable.updateValue(var_id, value)
         except Exception as exc:
             self.logger.error(
-                f"[Sensor Monitor] Could not save firing device to "
+                f"[Device Activity Monitor] Could not save firing device to "
                 f"variable {var_id}: {exc}"
             )
 
     # ======================================
     # MENU ITEM CALLBACKS
-    # Plugins > Sensor Monitor > ...
+    # Plugins > Device Activity Monitor > ...
     # ======================================
 
     def menuDiscoverDevices(self):
         """Scan all Indigo devices, write device_discovery.json and
-        sensor_monitor_config.json to <Indigo base>/Logs/SensorMonitor/.
+        device_activity_monitor_config.json to <Indigo base>/Logs/DeviceActivityMonitor/.
 
         Contact and motion sensor candidates are written as active entries,
         unless their device ID is listed in the existing config's "excluded_ids"
@@ -798,14 +799,14 @@ class Plugin(indigo.PluginBase):
         list is preserved so future re-discovery runs respect the exclusion.
 
         To permanently exclude a device from monitoring:
-          1. Edit sensor_monitor_config.json
+          1. Edit device_activity_monitor_config.json
           2. Add the device ID to the "excluded_ids" list, e.g.:
                "excluded_ids": [123456789],
-          3. Save and re-run discovery (Plugins > Sensor Monitor > Discover Devices)
+          3. Save and re-run discovery (Plugins > Device Activity Monitor > Discover Devices)
           The device will now appear commented-out on every future re-discovery.
         """
         ts = datetime.now().strftime('%H:%M:%S')
-        self.logger.info(f"[{ts}] [Sensor Monitor] Device discovery starting...")
+        self.logger.info(f"[{ts}] [Device Activity Monitor] Device discovery starting...")
 
         # --- Read excluded_ids from existing config (preserved across re-discovery) ---
         excluded_ids = set()
@@ -819,7 +820,7 @@ class Plugin(indigo.PluginBase):
                 excluded_ids = set(int(x) for x in existing_cfg.get("excluded_ids", []))
                 if excluded_ids:
                     self.logger.info(
-                        f"[{ts}] [Sensor Monitor] Preserving {len(excluded_ids)} "
+                        f"[{ts}] [Device Activity Monitor] Preserving {len(excluded_ids)} "
                         f"excluded device(s) from existing config"
                     )
             except Exception:
@@ -894,7 +895,7 @@ class Plugin(indigo.PluginBase):
         except Exception as e:
             self.logger.error(f"[{ts}] ERROR saving device_discovery.json: {e}")
 
-        # --- Save sensor_monitor_config.json ---
+        # --- Save device_activity_monitor_config.json ---
         try:
             lines = ["{"]
             lines.append(f'  "_generated": "{datetime.now().isoformat()}",')
@@ -978,7 +979,7 @@ class Plugin(indigo.PluginBase):
                 f.write("\n".join(lines) + "\n")
             self.logger.info(f"[{ts}] Plugin config saved to: {CONFIG_PATH}")
         except Exception as e:
-            self.logger.error(f"[{ts}] ERROR saving sensor_monitor_config.json: {e}")
+            self.logger.error(f"[{ts}] ERROR saving device_activity_monitor_config.json: {e}")
 
         # --- Summary ---
         self.logger.info(
@@ -999,7 +1000,7 @@ class Plugin(indigo.PluginBase):
             for d in active_motions:
                 self.logger.info(f"[{ts}]   {d['name']} (ID: {d['id']}, Folder: {d['folder']})")
         self.logger.info(
-            f"[{ts}] Reload to apply: Plugins > Sensor Monitor > Reload Plugin"
+            f"[{ts}] Reload to apply: Plugins > Device Activity Monitor > Reload Plugin"
         )
 
     def menuFindContactSensors(self):
@@ -1054,7 +1055,7 @@ class Plugin(indigo.PluginBase):
         self.logger.info(f"[{ts}] === End of Discovery ===")
 
     def menuReloadConfig(self):
-        """Reload sensor_monitor_config.json without a full plugin restart.
+        """Reload device_activity_monitor_config.json without a full plugin restart.
 
         Equivalent to a plugin reload for config changes, but preserves
         the existing device/variable subscriptions.
@@ -1068,7 +1069,7 @@ class Plugin(indigo.PluginBase):
 
         ts = datetime.now().strftime('%H:%M:%S')
         self.logger.info(
-            f"[{ts}] [Sensor Monitor] Config reloaded - "
+            f"[{ts}] [Device Activity Monitor] Config reloaded - "
             f"{old_dev_count} -> {len(self.device_monitor)} devices, "
             f"{old_var_count} -> {len(self.variable_monitor)} variables"
         )
@@ -1082,7 +1083,7 @@ class Plugin(indigo.PluginBase):
         """Return True if the device belongs to a plugin that should be excluded.
 
         Virtual devices and Alexa mirror devices are excluded so they never
-        appear in sensor_monitor_config.json.  The Alexa plugin creates a named
+        appear in device_activity_monitor_config.json.  The Alexa plugin creates a named
         mirror for every exposed Indigo device, so a switch called
         'HA Garage Door' would appear as a contact candidate without this check.
         The exclusion list is _EXCLUDED_PLUGIN_IDS at module level — add IDs
@@ -1239,7 +1240,7 @@ class Plugin(indigo.PluginBase):
         return ["onState"]
 
     def _format_entry_line(self, dev, state, on_text, off_text, commented=False):
-        """Return a formatted JSON object string for sensor_monitor_config.json.
+        """Return a formatted JSON object string for device_activity_monitor_config.json.
 
         commented=True  prepends '# ' so the entry is disabled by default.
         """
@@ -1274,62 +1275,6 @@ class Plugin(indigo.PluginBase):
     # ======================================
     # PRIVATE HELPERS
     # ======================================
-
-    def _migrate_config_to_prefs(self):
-        """One-time migration from the v1.7.0 location (Logs/SensorMonitor/)
-        to the proper Indigo Preferences/Plugins/<bundle>/ folder.
-
-        Runs every startup but is a no-op once the new files exist. Uses
-        os.rename so the file's mtime is preserved.
-        """
-        try:
-            os.makedirs(_PREFS_DIR, exist_ok=True)
-        except Exception as exc:
-            # logger may not be ready inside __init__ — best-effort
-            try:
-                self.logger.warning(
-                    f"[Sensor Monitor] Could not create prefs dir "
-                    f"{_PREFS_DIR}: {exc}"
-                )
-            except Exception:
-                pass
-            return
-
-        moves = [
-            (LEGACY_CONFIG_PATH,           CONFIG_PATH,           "sensor_monitor_config.json"),
-            (LEGACY_DISCOVERY_OUTPUT_PATH, DISCOVERY_OUTPUT_PATH, "device_discovery.json"),
-        ]
-        moved_any = False
-        for src, dst, label in moves:
-            if not os.path.exists(src):
-                continue
-            if os.path.exists(dst):
-                # Don't clobber a newer file at the new location
-                continue
-            try:
-                os.rename(src, dst)
-                moved_any = True
-                try:
-                    self.logger.info(
-                        f"[Sensor Monitor] Migrated {label}: "
-                        f"{src} -> {dst}"
-                    )
-                except Exception:
-                    pass
-            except Exception as exc:
-                try:
-                    self.logger.warning(
-                        f"[Sensor Monitor] Could not migrate {label}: {exc}"
-                    )
-                except Exception:
-                    pass
-
-        # Clean up the now-empty legacy directory (silent if not empty or missing)
-        if moved_any:
-            try:
-                os.rmdir(_LEGACY_DIR)
-            except OSError:
-                pass  # not empty, or already gone — fine
 
     def _load_config(self, config_path=None):
         """Load device and variable monitor lists from the JSON config file.
@@ -1375,7 +1320,7 @@ class Plugin(indigo.PluginBase):
                                      for k, v in VARIABLE_MONITOR.items()}
             try:
                 self.logger.warning(
-                    f"[Sensor Monitor] Could not read config file: {e} - "
+                    f"[Device Activity Monitor] Could not read config file: {e} - "
                     f"using hardcoded fallback dicts"
                 )
             except Exception:
@@ -1404,12 +1349,12 @@ class Plugin(indigo.PluginBase):
                 "label": entry.get("label", entry.get("name", f"Variable {var_id}"))
             }
 
-        # Groups are smGroup Indigo devices as of v1.8.1; they're loaded
+        # Groups are damGroup Indigo devices as of v1.8.1; they're loaded
         # by deviceStartComm, not by this method. self.device_groups is
         # untouched here.
         try:
             self.logger.info(
-                f"[Sensor Monitor] Config loaded from: {path} "
+                f"[Device Activity Monitor] Config loaded from: {path} "
                 f"({len(self.device_monitor)} devices, "
                 f"{len(self.variable_monitor)} variables)"
             )
@@ -1427,7 +1372,7 @@ class Plugin(indigo.PluginBase):
             else:
                 missing.append(f"  [!]  ID {device_id} - not found in Indigo")
 
-        self.logger.info(f"[Sensor Monitor] Device validation - {len(found)} found, {len(missing)} missing:")
+        self.logger.info(f"[Device Activity Monitor] Device validation - {len(found)} found, {len(missing)} missing:")
         for entry in found:
             self.logger.info(entry)
 
@@ -1435,11 +1380,11 @@ class Plugin(indigo.PluginBase):
             for entry in missing:
                 self.logger.warning(entry)
             self.logger.warning(
-                f"[Sensor Monitor] {len(missing)} monitored device(s) not found - "
+                f"[Device Activity Monitor] {len(missing)} monitored device(s) not found - "
                 f"check IDs in config file or DEVICE_MONITOR in plugin.py"
             )
         else:
-            self.logger.info("[Sensor Monitor] All monitored devices validated OK")
+            self.logger.info("[Device Activity Monitor] All monitored devices validated OK")
 
     def _validate_monitored_variables(self):
         """Check all variable_monitor entries exist in Indigo at startup."""
@@ -1455,7 +1400,7 @@ class Plugin(indigo.PluginBase):
             else:
                 missing.append(f"  [!]  ID {var_id} - not found in Indigo")
 
-        self.logger.info(f"[Sensor Monitor] Variable validation - {len(found)} found, {len(missing)} missing:")
+        self.logger.info(f"[Device Activity Monitor] Variable validation - {len(found)} found, {len(missing)} missing:")
         for entry in found:
             self.logger.info(entry)
 
@@ -1463,11 +1408,11 @@ class Plugin(indigo.PluginBase):
             for entry in missing:
                 self.logger.warning(entry)
             self.logger.warning(
-                f"[Sensor Monitor] {len(missing)} monitored variable(s) not found - "
+                f"[Device Activity Monitor] {len(missing)} monitored variable(s) not found - "
                 f"check IDs in config file or VARIABLE_MONITOR in plugin.py"
             )
         else:
-            self.logger.info("[Sensor Monitor] All monitored variables validated OK")
+            self.logger.info("[Device Activity Monitor] All monitored variables validated OK")
 
     # ======================================
     # Menu handlers

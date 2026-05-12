@@ -3,22 +3,22 @@
 
     <!-- ============================================================
          Group Change Listener
-         Fires whenever any device in the selected Sensor Monitor Group
+         Fires whenever any device in the selected Device Activity Monitor Group
          has a state change.  As of v1.8.0, groups are first-class Indigo
-         devices (type smGroup) created via Indigo Devices > New Device.
+         devices (type damGroup) created via Indigo Devices > New Device.
          Pre-v1.8.0 triggers configured by group name still work — the
          plugin falls back to the JSON groups[] array when no
          groupDevice is set.
          ============================================================ -->
-    <Event id="sensorGroupChange">
-        <Name>Sensor Monitor: Group Changed</Name>
+    <Event id="damGroupChange">
+        <Name>Device Activity Monitor: Group Changed</Name>
         <ConfigUI>
             <Field id="instructions" type="label" fontSize="small">
-                <Label>Fires whenever any device in the selected group has a state change. Pick the group device (Indigo Devices > New Device > Sensor Monitor Group to create one).</Label>
+                <Label>Fires whenever any device in the selected group has a state change. Pick the group device (Indigo Devices > New Device > Device Activity Monitor Group to create one).</Label>
             </Field>
             <Field id="groupDevice" type="menu">
                 <Label>Group:</Label>
-                <List class="self" filter="self.smGroup" method="getGroupDeviceList" dynamicReload="true"/>
+                <List class="self" filter="self.damGroup" method="getGroupDeviceList" dynamicReload="true"/>
             </Field>
             <Field id="fireOn" type="menu" defaultValue="any">
                 <Label>Fire on:</Label>

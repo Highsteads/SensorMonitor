@@ -2,20 +2,20 @@
 <Devices>
 
     <!-- ============================================================
-         Sensor Monitor Group (smGroup)
+         Device Activity Monitor Group (damGroup)
          Each device represents a named group of Indigo devices whose
-         state changes should fire a "Sensor Monitor: Group Changed"
+         state changes should fire a "Device Activity Monitor: Group Changed"
          trigger.  Replaces the JSON groups[] array as of v1.8.0 — JSON
          groups still load for backward compatibility, but new groups
-         should be created as smGroup devices via the standard Indigo
+         should be created as damGroup devices via the standard Indigo
          "New Device" flow.
 
          ConfigUI uses the two-list "Available / Members" pattern with
          folder filtering — Indigo has no native checkbox-list widget,
          so this is the cleanest UX achievable in the platform.
          ============================================================ -->
-    <Device type="custom" id="smGroup">
-        <Name>Sensor Monitor Group</Name>
+    <Device type="custom" id="damGroup">
+        <Name>Device Activity Monitor Group</Name>
         <ConfigUI>
 
             <Field id="instructions" type="label" fontSize="small">
