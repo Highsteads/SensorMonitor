@@ -3,8 +3,23 @@
 # Filename:    plugin.py
 # Description: Sensor Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
-# Date:        11-05-2026
-# Version:     1.7.1
+# Date:        12-05-2026
+# Version:     1.7.2
+#
+# v1.7.2 (12-05-2026):
+# - Group-Changed trigger gains a "Fire on" direction filter:
+#     any         - fire on every state change (default; v1.7.0 behaviour)
+#     activated   - fire only on onState False -> True
+#                   (door OPEN, motion DETECTED, switch ON)
+#     deactivated - fire only on onState True -> False
+#                   (door CLOSED, motion CLEAR, switch OFF)
+#   Works for groups of any size including a single device, so this also
+#   gives a clean replacement for Indigo's built-in "Device State Changed"
+#   trigger when you'd rather pick a group by name than re-pick the device
+#   in every trigger.
+# - deviceUpdated now fires the group-trigger check on onState transitions
+#   too (not only on dev.states dict changes), so direction filters work
+#   even on plugin devices whose onState lives outside the states dict.
 #
 # v1.7.1 (11-05-2026):
 # - Moved sensor_monitor_config.json and device_discovery.json out of
@@ -312,15 +327,21 @@ class Plugin(indigo.PluginBase):
         if newDev.pluginId == self.pluginId:
             return
 
-        # --- Group-change triggers (v1.7.0) ---
+        # --- Group-change triggers (v1.7.0, direction filter v1.7.2) ---
         # Independent of the per-state logging path below: a device may be in
-        # a group without being in device_monitor, and vice-versa. We fire
-        # group triggers on ANY state change (matches Morris's plugin
-        # behaviour: "fire when anything on these devices changes").
+        # a group without being in device_monitor, and vice-versa. Group
+        # triggers fire on ANY state change OR onState transition; the
+        # per-trigger "fireOn" filter (any / activated / deactivated) decides
+        # which transitions actually fire.
         if newDev.id in self.group_members:
             try:
-                if newDev.states != origDev.states:
-                    self._fire_group_triggers(newDev)
+                states_changed = (newDev.states != origDev.states)
+                onstate_flip   = (
+                    getattr(newDev, "onState", None)
+                    != getattr(origDev, "onState", None)
+                )
+                if states_changed or onstate_flip:
+                    self._fire_group_triggers(origDev, newDev)
             except Exception as exc:
                 self.logger.error(f"[Sensor Monitor] group-trigger error: {exc}")
 
@@ -461,26 +482,49 @@ class Plugin(indigo.PluginBase):
         result = [(name, name) for name in sorted(self.groups.keys())]
         return result if result else [("none", "-- No groups defined in config --")]
 
-    def _fire_group_triggers(self, dev):
-        """Fire any sensorGroupChange triggers whose group contains dev.id."""
+    def _fire_group_triggers(self, origDev, newDev):
+        """Fire any sensorGroupChange triggers whose group contains newDev.id,
+        subject to the per-trigger fireOn direction filter:
+
+          "any"          fire on any state or onState change (default)
+          "activated"    fire only on an onState False -> True transition
+                         (door OPEN, motion DETECTED, switch ON)
+          "deactivated"  fire only on an onState True -> False transition
+                         (door CLOSED, motion CLEAR, switch OFF)
+        """
+        on_new  = bool(getattr(newDev,  "onState", False))
+        on_old  = bool(getattr(origDev, "onState", False))
+        flipped = on_new != on_old
+
         for trigger in self.event_triggers.values():
             if trigger.pluginTypeId != "sensorGroupChange":
                 continue
             group = trigger.pluginProps.get("groupName", "")
             members = self.groups.get(group, set())
-            if dev.id not in members:
+            if newDev.id not in members:
                 continue
+
+            fire_on = trigger.pluginProps.get("fireOn", "any")
+            if fire_on == "activated":
+                if not (flipped and on_new):
+                    continue
+            elif fire_on == "deactivated":
+                if not (flipped and not on_new):
+                    continue
+            # else fire_on == "any" — no filter, the caller already gated
+            # this call on at least one state or onState change.
 
             # Optional: save the firing device to a variable before firing,
             # so the trigger's actions can read it via %%v:NN%% substitution.
             if trigger.pluginProps.get("saveBool", False):
-                self._save_firing_device(trigger, dev)
+                self._save_firing_device(trigger, newDev)
 
             indigo.trigger.execute(trigger)
             ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
             self.logger.debug(
                 f"[{ts}] [Sensor Monitor] Fired group trigger "
-                f"'{trigger.name}' (group '{group}') for {dev.name}"
+                f"'{trigger.name}' (group '{group}', fireOn={fire_on}) "
+                f"for {newDev.name}"
             )
 
     def _save_firing_device(self, trigger, dev):

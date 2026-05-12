@@ -19,6 +19,17 @@
                 <Label>Group:</Label>
                 <List class="self" method="getGroupNamesList" dynamicReload="true"/>
             </Field>
+            <Field id="fireOn" type="menu" defaultValue="any">
+                <Label>Fire on:</Label>
+                <List>
+                    <Option value="any">Any change (default)</Option>
+                    <Option value="activated">Any device becomes ON / OPEN / detected</Option>
+                    <Option value="deactivated">Any device becomes OFF / CLOSED / clear</Option>
+                </List>
+            </Field>
+            <Field id="fireOnHint" type="label" fontColor="darkgray" fontSize="small" alignWithControl="true">
+                <Label>"Any change" fires on every state update. The directional options fire only on an onState transition.</Label>
+            </Field>
             <Field id="saveBool" type="checkbox" defaultValue="false">
                 <Label>Save firing device:</Label>
                 <Description>Save the device that triggered this event to an Indigo variable.</Description>
