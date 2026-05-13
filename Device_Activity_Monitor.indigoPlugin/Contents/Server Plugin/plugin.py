@@ -4,7 +4,18 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        13-05-2026
-# Version:     1.9.1
+# Version:     1.9.2
+#
+# v1.9.2 (13-05-2026):
+# - Fix: classifier no longer mis-tags non-motion Z2M devices as motion.
+#   The generic z2mSensor type emits stub motion/contact/waterLeak state
+#   fields on every device. Discovery now trusts Z2M's has_* flags when
+#   they identify a type (water_leak, temperature, humidity, etc.) and
+#   only falls back to state-name matching for non-Z2M devices.
+#   For Z2M "generic sensor" devices (all has_* False) name-keyword
+#   matching is used instead of the unreliable stub state fields.
+#   Also fixes the inverse case: contact sensors on a generic z2mSensor
+#   model (has_contact=False) are no longer wrongly excluded.
 #
 # v1.9.1 (13-05-2026):
 # - Fix: motion sensor entries from "Find Contact and Motion Centre" menu
@@ -1145,6 +1156,25 @@ class Plugin(indigo.PluginBase):
             return {}
         return {k: v for k, v in props.items() if k.startswith("has_")}
 
+    # Z2M type-defining capability flags. has_battery is excluded because it
+    # appears on most devices and says nothing about the sensor type.
+    _Z2M_TYPE_FLAGS = (
+        "has_contact", "has_occupancy", "has_presence", "has_pir",
+        "has_water_leak", "has_temperature", "has_humidity",
+        "has_illuminance", "has_pressure",
+    )
+
+    def _z2m_has_identified_type(self, z2m_caps):
+        """True if Z2M has identified at least one type-defining capability.
+
+        "Generic sensor" Z2M devices have all has_* flags False — Z2M doesn't
+        recognise the model. The generic z2mSensor device type emits stub
+        fields for motion/contact/occupancy/waterLeak on every device, so
+        when Z2M doesn't know the type, those stub state fields are
+        unreliable and classification must fall through to name heuristics.
+        """
+        return any(z2m_caps.get(k) is True for k in self._Z2M_TYPE_FLAGS)
+
     def _disc_is_contact(self, dev, states):
         """Return True if dev looks like a contact/door/window sensor.
 
@@ -1165,13 +1195,14 @@ class Plugin(indigo.PluginBase):
         name matching.
         """
         z2m_caps = self._disc_z2m_capabilities(dev)
-        # 1. Z2M bridge authoritative
+        # 1. Z2M bridge authoritative — only when Z2M has identified the type.
+        #    Generic z2mSensor devices have all has_* flags False, in which
+        #    case has_contact=False is NOT authoritative and we fall through.
         if z2m_caps.get("has_contact") is True:
             return True
-        if z2m_caps.get("has_contact") is False:
-            return False
-        # Any explicit motion capability on Z2M means it's a motion device, not contact
-        if any(z2m_caps.get(k) is True for k in ("has_occupancy", "has_presence", "has_pir")):
+        if self._z2m_has_identified_type(z2m_caps):
+            # Z2M knows what this device is and contact is not one of its
+            # capabilities — trust that over any stub state fields.
             return False
 
         # 2. deviceTypeId hint
@@ -1186,8 +1217,10 @@ class Plugin(indigo.PluginBase):
         if any(kw in name_lower for kw in _MOTION_NAME_KEYWORDS):
             return False
 
-        # 4. State-name match
-        if _CONTACT_STATE_NAMES & set(states.keys()):
+        # 4. State-name match — skip for Z2M generic devices: the contact
+        #    state field is a stub and may not reflect the real device type.
+        is_z2m_generic = bool(z2m_caps)  # generic if we got here with z2m_caps
+        if not is_z2m_generic and (_CONTACT_STATE_NAMES & set(states.keys())):
             return True
 
         # 5. Name-keyword match
@@ -1212,14 +1245,23 @@ class Plugin(indigo.PluginBase):
         z2m_caps = self._disc_z2m_capabilities(dev)
         if any(z2m_caps.get(k) is True for k in ("has_occupancy", "has_presence", "has_pir")):
             return True
-        # If Z2M explicitly says none of those capabilities are present,
-        # fall through to other heuristics (some devices report presenceEvent
-        # without the has_presence flag — Aqara RTCZCGQ11LM is one example).
+        # If Z2M has identified a non-motion type (water_leak, temperature,
+        # humidity, contact, etc.) then this is NOT a motion device — ignore
+        # the stub `motion` state field that generic z2mSensor emits on every
+        # device regardless of physical capability.
+        if self._z2m_has_identified_type(z2m_caps):
+            return False
+        # Z2M generic sensors (all has_* False) fall through to name-keyword
+        # matching only — some devices report presenceEvent without the
+        # has_presence flag (Aqara RTCZCGQ11LM is one example), so the name
+        # is the only reliable signal.
 
         if getattr(dev, "deviceTypeId", "") in _Z2M_OCCUPANCY_TYPE_IDS:
             return True
 
-        if _MOTION_STATE_NAMES & set(states.keys()):
+        # State-name match — skip for Z2M generic devices (stub fields unreliable).
+        is_z2m_generic = bool(z2m_caps)
+        if not is_z2m_generic and (_MOTION_STATE_NAMES & set(states.keys())):
             return True
 
         if not hasattr(dev, "onState"):
