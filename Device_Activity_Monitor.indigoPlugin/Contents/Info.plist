@@ -9,11 +9,11 @@
     <key>CFBundleName</key>
     <string>DeviceActivityMonitor</string>
     <key>CFBundleVersion</key>
-    <string>1.9.0</string>
+    <string>1.9.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.9.0</string>
+    <string>1.9.1</string>
     <key>PluginVersion</key>
-    <string>1.9.0</string>
+    <string>1.9.1</string>
     <key>ServerApiVersion</key>
     <string>3.0</string>
     <key>GithubInfo</key>

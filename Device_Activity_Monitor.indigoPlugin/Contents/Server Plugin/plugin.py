@@ -3,8 +3,13 @@
 # Filename:    plugin.py
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
-# Date:        12-05-2026
-# Version:     1.9.0
+# Date:        13-05-2026
+# Version:     1.9.1
+#
+# v1.9.1 (13-05-2026):
+# - Fix: motion sensor entries from "Find Contact and Motion Centre" menu
+#   now use MOTION / CLEAR as on_text/off_text (matched documented convention)
+#   instead of the incorrect ON / OFF.
 #
 # v1.9.0 (12-05-2026):
 # - PLUGIN RENAMED:  Sensor Monitor  ->  Device Activity Monitor.
@@ -1267,10 +1272,10 @@ class Plugin(indigo.PluginBase):
     def _disc_motion_entry(self, dev, state_name, commented=False):
         """Return a JSON config file line for a MOTION sensor device and state.
 
-        Uses ON / OFF as the text values (motion detected / clear).
+        Uses MOTION / CLEAR as the text values (motion detected / clear).
         commented=True  prepends '# ' so the entry is disabled by default.
         """
-        return self._format_entry_line(dev, state_name, "ON", "OFF", commented)
+        return self._format_entry_line(dev, state_name, "MOTION", "CLEAR", commented)
 
     # ======================================
     # PRIVATE HELPERS
