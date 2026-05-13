@@ -4,7 +4,14 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
 # Date:        13-05-2026
-# Version:     1.9.2
+# Version:     1.9.3
+#
+# v1.9.3 (13-05-2026):
+# - Add on_value / off_value config keys for explicit value matching on
+#   string-typed states. Needed for Aqara RTCZCGQ11LM-style presence
+#   sensors whose only signal is presenceEvent ("enter" / "leave") with
+#   no boolean fallback. Truthy/falsy mode is preserved when these
+#   keys are absent.
 #
 # v1.9.2 (13-05-2026):
 # - Fix: classifier no longer mis-tags non-motion Z2M devices as motion.
@@ -265,6 +272,11 @@ _EXCLUDED_PLUGIN_IDS = {
 #   "label"    : shown in log after the device name
 #   "on_text"  : optional - text when state is True  (default: "ON")
 #   "off_text" : optional - text when state is False (default: "OFF")
+#   "on_value" : optional - explicit value (or list) that means "on" -
+#                use for string-typed states like presenceEvent
+#                e.g. "on_value": "enter", "off_value": "leave"
+#                When set, comparison is by value, not truthy/falsy.
+#   "off_value": optional - explicit value (or list) that means "off"
 #
 # Device name is always read live from Indigo (newDev.name),
 # so renaming a device in Indigo is instantly reflected in logs.
@@ -423,10 +435,29 @@ class Plugin(indigo.PluginBase):
             if old_val == new_val:
                 continue  # State did not change - skip
 
-            on_text    = config.get("on_text",  "ON")
-            off_text   = config.get("off_text", "OFF")
-            state_text = on_text if new_val else off_text
-            label      = config["label"]
+            on_text   = config.get("on_text",  "ON")
+            off_text  = config.get("off_text", "OFF")
+            on_value  = config.get("on_value")
+            off_value = config.get("off_value")
+
+            # When on_value/off_value are configured, use explicit value
+            # matching — needed for string-typed states like presenceEvent
+            # (Aqara RTCZCGQ11LM) whose values are "enter" / "leave" rather
+            # than booleans. Otherwise fall back to truthy/falsy comparison.
+            if on_value is not None or off_value is not None:
+                def _matches(val, target):
+                    if isinstance(target, (list, tuple)):
+                        return val in target
+                    return val == target
+                if on_value is not None and _matches(new_val, on_value):
+                    state_text = on_text
+                elif off_value is not None and _matches(new_val, off_value):
+                    state_text = off_text
+                else:
+                    continue  # New value matches neither — don't log
+            else:
+                state_text = on_text if new_val else off_text
+            label = config["label"]
 
             # Suppress the label if it is identical to the device name to
             # avoid e.g. "Side Passage Motion Side Passage Motion OFF"
@@ -1386,6 +1417,10 @@ class Plugin(indigo.PluginBase):
                 state_conf["on_text"]  = entry["on_text"]
             if "off_text" in entry:
                 state_conf["off_text"] = entry["off_text"]
+            if "on_value"  in entry:
+                state_conf["on_value"]  = entry["on_value"]
+            if "off_value" in entry:
+                state_conf["off_value"] = entry["off_value"]
             self.device_monitor.setdefault(dev_id, []).append(state_conf)
 
         # --- Build self.variable_monitor from "variables" list ---
